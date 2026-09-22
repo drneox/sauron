@@ -13,8 +13,8 @@ Hybrid RAG: keep tool-calling as the backbone for structured data, add one seman
 - New read-only chat tool `search_findings(query, company?, domain?, days?)` with cosine search + scope filters
 - Reuse existing guardrails: read-only tools, arg whitelist, output secret redaction
 
-### Asset identity for cross-store mobile apps
-Assets key on `(type="app", value=name)`, so the same app on App Store and Google Play overwrites itself (5 of 8 official BCP apps land in the inventory; all 8 are in scan results). Change identity to `(type, store, bundle/track id)` and surface store-specific rows.
+### Host-scan fan-out
+After a full vulnerability scan, automatically enqueue per-host scans for alive inventoried hosts — capped (`host_scan_max_targets`), delta-aware (only never-scanned / changed / stale hosts), aliveness-probed first. Settings toggle, off by default.
 
 ## Security follow-ups (from the pre-release audit)
 
@@ -27,9 +27,7 @@ Assets key on `(type="app", value=name)`, so the same app on App Store and Googl
 
 ## Robustness
 
-- **Scan result persistence**: sanitize invalid Unicode escape sequences before `Scan.result` JSONB insert (observed: `OperationalError: unsupported Unicode escape sequence` on full scans with certain payloads — results survive in memory but don't persist)
 - **reverse_ip upstream quota**: hackertarget free tier rate-limits; consider a fallback source or backoff+retry window
-- **PDF per-scan report**: investigate the individual-report PDF path (company PDF verified working)
 
 ## Later / exploratory
 

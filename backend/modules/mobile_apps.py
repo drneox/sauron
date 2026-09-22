@@ -405,6 +405,15 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         app_entry["llm_verdict"] = verdicts.get((app_entry["store"], app_entry["name"]))
         app_entry.setdefault("official_developer", False)
 
+    if ai_available and candidates and not verdicts:
+        # AI configured but the call failed (rate limit, outage): without a
+        # verdict nothing would be filtered, flooding the inventory with store
+        # noise. Fall back to the name-match heuristic for the suspicious list.
+        logger.warning(f"[mobile_apps] LLM unavailable for '{brand}' — name-match fallback")
+        result["suspicious"] = [
+            a for a in result["suspicious"] if _matches_brand(a.get("name") or "", brand)
+        ]
+
     # When the LLM classified, drop "unrelated" from the official apps list —
     # a third-party app that merely shares a word with the brand is not the
     # company's asset (e.g. "Banco del Pacífico" ≠ "Pacífico Seguros").

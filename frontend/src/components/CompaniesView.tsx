@@ -3,7 +3,7 @@ import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { Company, CompanyDomain, DiscoveredDomain, DiscoveryResult } from '../types/report'
-import { Bot, CalendarClock, Check, Play, Plus, Radar, Search, Trash2, X } from 'lucide-react'
+import { Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
 
 interface Props {
   readOnly?: boolean
@@ -373,6 +373,7 @@ function DiscoveryPanel({
   }
 
   const candidates = result?.candidates ?? []
+  const discoveredApps = result?.apps ?? []
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark-50/40 backdrop-blur-sm p-4">
@@ -417,7 +418,7 @@ function DiscoveryPanel({
           </div>
         )}
 
-        {phase === 'done' && candidates.length === 0 && (
+        {phase === 'done' && candidates.length === 0 && discoveredApps.length === 0 && (
           <div className="text-center text-dark-500 py-12 text-sm">
             {t('companies.discovery.none')}
           </div>
@@ -486,6 +487,46 @@ function DiscoveryPanel({
               </button>
             </div>
           </>
+        )}
+        {phase === 'done' && discoveredApps.length > 0 && (
+          <div className="mt-4">
+            <h4 className="text-xs font-semibold text-dark-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+              <Smartphone className="w-3.5 h-3.5 text-cyber-600" />
+              {t('companies.discovery.appsTitle', { count: discoveredApps.length })}
+            </h4>
+            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+              {discoveredApps.map((a, i) => (
+                <div key={`${a.store}:${a.name}:${i}`} className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-dark-800 text-sm">
+                  <span className={clsx(
+                    'text-[10px] px-1.5 py-0.5 rounded-full font-semibold border shrink-0',
+                    a.store === 'app_store'
+                      ? 'bg-sky-50 text-sky-700 border-sky-200'
+                      : 'bg-emerald-50 text-emerald-700 border-emerald-200',
+                  )}>
+                    {a.store === 'app_store' ? 'App Store' : 'Google Play'}
+                  </span>
+                  <span className="text-dark-100 font-medium truncate flex-1">{a.name}</span>
+                  {a.version && <span className="text-xs text-dark-500 font-mono shrink-0">v{a.version}</span>}
+                  {a.llm_verdict && (
+                    <span className={clsx(
+                      'text-[10px] px-1.5 py-0.5 rounded-full font-semibold border shrink-0',
+                      a.llm_verdict === 'official'
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-amber-50 text-amber-700 border-amber-200',
+                    )}>
+                      {a.llm_verdict}
+                    </span>
+                  )}
+                  {a.url && (
+                    <a href={a.url} target="_blank" rel="noopener noreferrer" className="text-dark-500 hover:text-cyber-600 shrink-0">
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+            <p className="text-[11px] text-dark-600 mt-1.5">{t('companies.discovery.appsHint')}</p>
+          </div>
         )}
       </div>
     </div>

@@ -720,11 +720,23 @@ export interface DiscoveredDomain {
   http_status: number | null
 }
 
+export interface DiscoveredApp {
+  name: string
+  store: string | null
+  os: string | null
+  version: string | null
+  developer: string | null
+  url: string | null
+  updated?: string | null
+  llm_verdict?: string | null
+}
+
 export interface DiscoveryResult {
   discovery_id: string
   status: 'running' | 'completed' | 'error'
   company_name?: string
   candidates?: DiscoveredDomain[]
+  apps?: DiscoveredApp[]
   searched_at?: string
   error?: string
 }

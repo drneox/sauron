@@ -505,3 +505,44 @@ async def run(company_name: str) -> list[dict[str, Any]]:
     result = sorted(candidates.values(), key=lambda c: _CONFIDENCE_ORDER.get(c["confidence"], 3))
     logger.info(f"[discovery] '{company_name}' -> {len(result)} candidates")
     return result
+
+
+async def discover_apps(company_name: str) -> list[dict[str, Any]]:
+    """App-store discovery for a company name — runs alongside domain discovery
+    so 'discover' means domains AND mobile apps. Reuses mobile_apps store
+    search + LLM classification; unrelated verdicts are dropped, result capped.
+    Never raises: app discovery is informational at this stage."""
+    from modules import mobile_apps
+
+    ai_available = bool(os.getenv("AI_API_KEY", "").strip())
+    candidates: list[dict] = []
+    try:
+        apps, susp = await asyncio.to_thread(mobile_apps._search_apple, company_name, ai_available)
+        candidates.extend(apps)
+        candidates.extend(susp)
+    except Exception as e:
+        logger.warning(f"[discovery] Apple app search failed for '{company_name}': {e}")
+    try:
+        apps, susp = await asyncio.to_thread(mobile_apps._search_google_play, company_name, None, ai_available)
+        candidates.extend(apps)
+        candidates.extend(susp)
+    except Exception as e:
+        logger.warning(f"[discovery] Google Play app search failed for '{company_name}': {e}")
+    if not candidates:
+        return []
+    verdicts = await asyncio.to_thread(
+        mobile_apps._llm_classify_apps, company_name, company_name, candidates)
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for app in candidates:
+        key = (app.get("store") or "", app.get("name") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        verdict = verdicts.get(key)
+        if verdict == "unrelated":
+            continue
+        app["llm_verdict"] = verdict
+        out.append(app)
+    logger.info(f"[discovery] '{company_name}' -> {len(out)} app candidates")
+    return out[:20]

@@ -1443,7 +1443,12 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
         # persist it (not even as suspicious): it's review noise.
         if app_entry.get("llm_verdict") == "unrelated":
             continue
-        wanted[("app", app_entry["name"])] = {
+        # Identity is store-scoped: "Yape" on Google Play and "Yape" on the App
+        # Store are DIFFERENT assets (the value carries a "store:" prefix that
+        # the API serializers strip before display).
+        store = app_entry.get("store") or "unknown"
+        wanted[("app", f"{store}:{app_entry['name']}")] = {
+            "name": app_entry["name"],
             "store": app_entry.get("store"),
             "os": app_entry.get("os"),
             "version": app_entry.get("version"),
@@ -2354,11 +2359,13 @@ async def download_pdf(scan_id: str):
 async def _run_discovery(discovery_id: str, company_name: str) -> None:
     try:
         candidates = await domain_discovery.run(company_name)
+        apps = await domain_discovery.discover_apps(company_name)
         DISCOVERIES[discovery_id].update(
             {
                 "status": "completed",
                 "company_name": company_name,
                 "candidates": candidates,
+                "apps": apps,
                 "searched_at": datetime.now(timezone.utc).isoformat(),
             }
         )
@@ -2531,6 +2538,7 @@ async def get_discovery(discovery_id: str):
         "status": "completed",
         "company_name": discovery["company_name"],
         "candidates": discovery["candidates"],
+        "apps": discovery.get("apps") or [],
         "searched_at": discovery["searched_at"],
     }
 
@@ -2564,7 +2572,7 @@ async def create_company(request: CompanyCreateRequest):
 
 @app.get("/api/companies")
 async def list_companies():
-    companies = await Company.all().order_by("name")
+    companies = await Company.all().order_by("-created_at")
     out = []
     for c in companies:
         domains = await Domain.filter(company_id=c.id).order_by("domain")
@@ -3018,6 +3026,8 @@ async def _build_company_assets(company: Company) -> dict:
             port_count += 1
         elif asset.type == "app":
             grouped["apps"].append(base | {
+                # Strip the "store:" identity prefix — the name alone is the display value
+                "value": meta.get("name") or asset.value.split(":", 1)[-1],
                 "store": meta.get("store"),
                 "os": meta.get("os"),
                 "version": meta.get("version"),
@@ -3081,7 +3091,8 @@ async def _record_app_rejections(assets: list[Asset]) -> None:
         meta = a.metadata or {}
         if a.type != "app" or not meta.get("store"):
             continue
-        by_domain.setdefault(a.domain_id, []).append({"store": meta["store"], "name": a.value})
+        name = meta.get("name") or a.value.split(":", 1)[-1]
+        by_domain.setdefault(a.domain_id, []).append({"store": meta["store"], "name": name})
     for domain_id, entries in by_domain.items():
         dom = await Domain.get_or_none(id=domain_id)
         if dom is None:
