@@ -25,9 +25,10 @@ const MODULE_LABEL: Record<string, string> = {
 
 interface Props {
   findings: Finding[]
+  baseUrl?: string
 }
 
-export default function FindingsPanel({ findings }: Props) {
+export default function FindingsPanel({ findings, baseUrl }: Props) {
   const { t } = useTranslation()
   const list = findings ?? []
   const grouped = ['critical', 'high', 'medium', 'low'].flatMap(risk =>
@@ -75,7 +76,7 @@ export default function FindingsPanel({ findings }: Props) {
                     [{MODULE_LABEL[f.module] ?? f.module}]
                   </span>
                   <p className="text-dark-200 mt-0.5 leading-snug">
-                    <LinkifyText text={typeof f.finding === 'string' ? f.finding : JSON.stringify(f.finding)} />
+                    <LinkifyText text={typeof f.finding === 'string' ? f.finding : JSON.stringify(f.finding)} baseUrl={baseUrl} />
                   </p>
                 </div>
               </div>

@@ -3,7 +3,7 @@ import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { Company, CompanyDomain, DiscoveredDomain, DiscoveryResult } from '../types/report'
-import { ArrowRight, Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
+import { Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
 
 interface Props {
   readOnly?: boolean
@@ -939,7 +939,7 @@ function SearchOrCreateBar({
             >
               <span className="text-sm text-dark-100 font-medium flex-1 truncate">{c.name}</span>
               <span className="text-xs text-cyber-700 font-medium inline-flex items-center gap-1 shrink-0">
-                {t('companies.viewAction')} <ArrowRight className="w-3.5 h-3.5" />
+                {t('companies.viewAction')} <Check className="w-3.5 h-3.5" />
               </span>
             </button>
           ))}
@@ -1016,7 +1016,7 @@ export default function CompaniesView({ readOnly = false, isAdmin = false, onSca
           companies={companies}
           query={query}
           onQueryChange={setQuery}
-          onView={onOpenDashboard}
+          onView={(c) => setQuery(c.name)}
           onCreate={handleCreate}
           creating={creating}
         />

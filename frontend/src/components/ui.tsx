@@ -101,40 +101,74 @@ export function downloadCsv(
 }
 
 const URL_RE = /(https?:\/\/[^\s<>"'`]+)/g
+// A bare path ("/configuration.php") rather than a full URL — most finding
+// strings only carry the path (e.g. "... → /configuration.php (medium
+// confidence)"), never the scheme+host. Bounded by whitespace/punctuation on
+// both sides (incl. the "→" arrow some modules use) so we don't swallow
+// trailing sentence punctuation or grab a slash inside running prose.
+const PATH_RE = /(?:(?<=[\s(:"'→])|^)(\/[A-Za-z0-9_][A-Za-z0-9_\-./]*)(?=[\s).,:;"']|$)/g
 
-/** Renders text with URLs turned into clickable links (opens in a new tab). */
-export function LinkifyText({ text, className }: { text: string; className?: string }) {
-  const parts = text.split(URL_RE)
+/**
+ * Renders text with URLs turned into clickable links (opens in a new tab).
+ * When `baseUrl` is given (a specific finding's own domain — only pass it
+ * where that's unambiguous, e.g. a per-domain findings list), bare paths
+ * like "/configuration.php" are ALSO linkified against that domain.
+ */
+export function LinkifyText({ text, className, baseUrl }: { text: string; className?: string; baseUrl?: string }) {
+  const urlParts = text.split(URL_RE)
   return (
     <span className={className}>
-      {parts.map((p, i) =>
-        /^https?:\/\//.test(p) ? (
-          <a
-            key={i}
-            href={p}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-cyber-700 hover:text-cyber-500 hover:underline break-all"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {p}
-          </a>
-        ) : (
-          <span key={i}>{p}</span>
-        ),
-      )}
+      {urlParts.map((part, i) => {
+        if (/^https?:\/\//.test(part)) {
+          return (
+            <a
+              key={i}
+              href={part}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-cyber-700 hover:text-cyber-500 hover:underline break-all"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {part}
+            </a>
+          )
+        }
+        if (!baseUrl) return <span key={i}>{part}</span>
+        // Odd indices of a one-capture-group split() are always the matches.
+        const pathParts = part.split(PATH_RE)
+        return (
+          <span key={i}>
+            {pathParts.map((p, j) =>
+              j % 2 === 1 ? (
+                <a
+                  key={j}
+                  href={baseUrl.replace(/\/$/, '') + p}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-mono text-cyber-700 hover:text-cyber-500 hover:underline break-all"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {p}
+                </a>
+              ) : (
+                <span key={j}>{p}</span>
+              ),
+            )}
+          </span>
+        )
+      })}
     </span>
   )
 }
 
-export function FindingsList({ findings }: { findings: string[] }) {
+export function FindingsList({ findings, baseUrl }: { findings: string[]; baseUrl?: string }) {
   if (!findings.length) return null
   return (
     <ul className="mt-3 space-y-1.5">
       {findings.map((f, i) => (
         <li key={i} className="flex items-start gap-2 text-xs text-amber-700">
           <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0 text-amber-500" />
-          <LinkifyText text={f} />
+          <LinkifyText text={f} baseUrl={baseUrl} />
         </li>
       ))}
     </ul>

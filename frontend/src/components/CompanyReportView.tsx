@@ -21,7 +21,7 @@ import {
 } from 'lucide-react'
 import { AssetSummary, Company } from '../types/report'
 import { getToken } from '../auth'
-import { PAGE_SIZE, Pager, RiskBadge } from './ui'
+import { LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
 
 interface FindingRow {
   module: string
@@ -74,10 +74,11 @@ const RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
 
 // Full findings list of one domain, severity-sorted (critical first) and
 // paginated with its own local page state.
-function DomainFindingsList({ findings }: { findings: FindingRow[] }) {
+function DomainFindingsList({ findings, domain }: { findings: FindingRow[]; domain: string }) {
   const [page, setPage] = useState(1)
   const sorted = [...findings].sort((a, b) => (RANK[a.risk] ?? 9) - (RANK[b.risk] ?? 9))
   const pageItems = sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const baseUrl = `https://${domain}`
   return (
     <div className="space-y-2">
       <ul className="divide-y divide-dark-800">
@@ -87,7 +88,7 @@ function DomainFindingsList({ findings }: { findings: FindingRow[] }) {
             <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 font-mono whitespace-nowrap">
               {f.module}
             </span>
-            <span className="text-sm text-dark-200">{f.finding}</span>
+            <LinkifyText text={f.finding} baseUrl={baseUrl} className="text-sm text-dark-200" />
           </li>
         ))}
       </ul>
@@ -336,7 +337,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
             ) : d.findings.length === 0 ? (
               <p className="text-sm text-dark-500">{t('companyReport.noFindings')}</p>
             ) : (
-              <DomainFindingsList findings={d.findings} />
+              <DomainFindingsList findings={d.findings} domain={d.domain} />
             )}
           </div>
         )
