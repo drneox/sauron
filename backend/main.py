@@ -2919,6 +2919,106 @@ async def company_rating_history(company_id: int):
     return {"company_id": company_id, "company_name": company.name, "points": points}
 
 
+# ── Dashboard analytics (charts) ─────────────────────────────────────────────
+@app.get("/api/dashboard/analytics")
+async def dashboard_analytics(company_id: int | None = Query(default=None)):
+    """Aggregated chart data: findings by severity/category, per-company
+    severity breakdown, cumulative surface timeline (asset first_seen), rating
+    trend and remediation status. Scope: all companies, or one with
+    ?company_id="""
+    companies = await (Company.filter(id=company_id) if company_id else Company.all())
+    comp_map = {c.id: c.name for c in companies}
+    domains = await Domain.filter(company_id__in=list(comp_map)) if comp_map else []
+    dom_to_company = {d.id: d.company_id for d in domains}
+    domain_ids = list(dom_to_company)
+
+    empty = {
+        "scope_company": comp_map.get(company_id),
+        "findings_by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "findings_by_category": {"vulnerability": 0, "misconfiguration": 0, "exposure": 0, "info": 0},
+        "per_company": [], "surface_timeline": [], "rating_trend": [], "remediation": [],
+    }
+    if not domain_ids:
+        return empty
+
+    sev_totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    cat_totals = {"vulnerability": 0, "misconfiguration": 0, "exposure": 0, "info": 0}
+    per_company: dict[int, dict] = {}
+    rating_trend: list[dict] = []
+
+    for d in domains:
+        latest = await Scan.filter(domain_id=d.id, status="completed",
+                                   kind__in=["full", "discover"]) \
+            .order_by("-completed_at", "-started_at").first()
+        if latest and latest.scorecard:
+            sc = latest.scorecard
+            sev = sc.get("findings_by_severity") or {}
+            cat = sc.get("findings_by_category") or {}
+            cid = d.company_id
+            pc = per_company.setdefault(cid, {
+                "company": comp_map.get(cid, "?"), "company_id": cid,
+                "critical": 0, "high": 0, "medium": 0, "low": 0,
+                "score": None, "grade": None,
+            })
+            for k in sev_totals:
+                sev_totals[k] += int(sev.get(k) or 0)
+                pc[k] += int(sev.get(k) or 0)
+            for k in cat_totals:
+                cat_totals[k] += int(cat.get(k) or 0)
+            pc["score"] = sc.get("score")
+            pc["grade"] = sc.get("grade")
+        # Rating trend: one point per scan with a score
+        async for s in Scan.filter(domain_id=d.id, status="completed", kind="full").order_by("completed_at"):
+            sc = s.scorecard or {}
+            if sc.get("score") is None or not s.completed_at:
+                continue
+            rating_trend.append({
+                "date": s.completed_at.date().isoformat(),
+                "company": comp_map.get(d.company_id, "?"),
+                "score": sc.get("score"),
+            })
+
+    # Cumulative surface timeline from asset first_seen dates
+    surface: dict[str, dict[str, Any]] = {}
+    async for a in Asset.filter(domain_id__in=domain_ids):
+        day = a.first_seen_at.date().isoformat() if a.first_seen_at else None
+        if not day:
+            continue
+        bucket = surface.setdefault(day, {"date": day})
+        bucket[a.type] = bucket.get(a.type, 0) + 1
+    surface_timeline: list[dict] = []
+    cumulative: dict[str, int] = {}
+    for day in sorted(surface):
+        row = surface[day]
+        for k, v in row.items():
+            if k == "date":
+                continue
+            cumulative[k] = cumulative.get(k, 0) + v
+            row[k] = cumulative[k]
+        surface_timeline.append(row)
+
+    # Remediation status per company
+    remediation_map: dict[int, dict] = {}
+    async for f in Finding.filter(domain_id__in=domain_ids):
+        cid = dom_to_company.get(f.domain_id)
+        if cid is None:
+            continue
+        rm = remediation_map.setdefault(cid, {
+            "company": comp_map.get(cid, "?"), "open": 0, "accepted": 0, "fixed": 0,
+        })
+        rm[f.status if f.status in ("open", "accepted", "fixed") else "open"] += 1
+
+    return {
+        "scope_company": comp_map.get(company_id),
+        "findings_by_severity": sev_totals,
+        "findings_by_category": cat_totals,
+        "per_company": sorted(per_company.values(), key=lambda p: p["company"]),
+        "surface_timeline": surface_timeline,
+        "rating_trend": rating_trend,
+        "remediation": sorted(remediation_map.values(), key=lambda r: r["company"]),
+    }
+
+
 @app.get("/api/companies/{company_id}/report.pdf")
 async def company_report_pdf(company_id: int):
     """Consolidated PDF report for a company: cover with totals, one section per
