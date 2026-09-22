@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { Company, CompanyDomain, DiscoveredDomain, DiscoveryResult } from '../types/report'
-import { Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
+import { ArrowRight, Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
 
 interface Props {
   readOnly?: boolean
@@ -868,14 +868,106 @@ function CompanyCard({
   )
 }
 
+// Single search-or-create control: typing filters the company list below AND
+// opens a dropdown with quick-jump matches plus a "Create" action when the
+// typed name doesn't already exist. Replaces the old pair of separate boxes
+// (a create form always on top, a filter input that only showed past 3
+// companies) with one control that does both.
+function SearchOrCreateBar({
+  companies,
+  query,
+  onQueryChange,
+  onView,
+  onCreate,
+  creating,
+}: {
+  companies: Company[]
+  query: string
+  onQueryChange: (q: string) => void
+  onView: (company: Company) => void
+  onCreate: (name: string) => void
+  creating: boolean
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const onOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [])
+
+  const trimmed = query.trim()
+  const matches = trimmed
+    ? companies.filter((c) => c.name.toLowerCase().includes(trimmed.toLowerCase())).slice(0, 8)
+    : []
+  const exactMatch = trimmed
+    ? companies.some((c) => c.name.toLowerCase() === trimmed.toLowerCase())
+    : true // no create action while empty
+
+  const submitCreate = () => {
+    if (!trimmed || exactMatch || creating) return
+    onCreate(trimmed)
+    setOpen(false)
+  }
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="card flex items-center gap-2 py-2.5">
+        <Search className="w-4 h-4 text-dark-500 shrink-0" />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => { onQueryChange(e.target.value); setOpen(true) }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitCreate() } }}
+          placeholder={t('companies.searchOrCreatePlaceholder')}
+          className="flex-1 bg-transparent text-sm text-dark-100 placeholder:text-dark-500 focus:outline-none"
+        />
+      </div>
+
+      {open && trimmed && (matches.length > 0 || !exactMatch) && (
+        <div className="absolute z-20 mt-1.5 w-full card p-1.5 shadow-lg max-h-72 overflow-y-auto">
+          {matches.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => { onView(c); setOpen(false) }}
+              className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left hover:bg-dark-900 transition-colors duration-150"
+            >
+              <span className="text-sm text-dark-100 font-medium flex-1 truncate">{c.name}</span>
+              <span className="text-xs text-cyber-700 font-medium inline-flex items-center gap-1 shrink-0">
+                {t('companies.viewAction')} <ArrowRight className="w-3.5 h-3.5" />
+              </span>
+            </button>
+          ))}
+          {!exactMatch && (
+            <button
+              onClick={submitCreate}
+              disabled={creating}
+              className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left hover:bg-cyber-50 disabled:opacity-50 transition-colors duration-150"
+            >
+              <Plus className="w-3.5 h-3.5 text-cyber-600 shrink-0" />
+              <span className="text-sm text-cyber-700 font-medium truncate">
+                {creating ? t('companies.creating') : t('companies.createOption', { name: trimmed })}
+              </span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function CompaniesView({ readOnly = false, isAdmin = false, onScanStarted, onOpenDashboard }: Props) {
   const { t } = useTranslation()
   const [companies, setCompanies] = useState<Company[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [name, setName] = useState('')
   const [creating, setCreating] = useState(false)
-  const [search, setSearch] = useState('')
+  const [query, setQuery] = useState('')
 
   const load = async () => {
     try {
@@ -896,18 +988,17 @@ export default function CompaniesView({ readOnly = false, isAdmin = false, onSca
 
   const reload = () => { load() }
   const showError = (msg: string) => setError(msg)
-  const visibleCompanies = search.trim()
-    ? companies.filter((c) => c.name.toLowerCase().includes(search.trim().toLowerCase()))
+  const visibleCompanies = query.trim()
+    ? companies.filter((c) => c.name.toLowerCase().includes(query.trim().toLowerCase()))
     : companies
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const clean = name.trim()
+  const handleCreate = async (rawName: string) => {
+    const clean = rawName.trim()
     if (!clean) return
     setCreating(true)
     try {
       await axios.post('/api/companies', { name: clean })
-      setName('')
+      setQuery('')
       await load()
     } catch (err) {
       setError(errorMessage(err, t('companies.createError', { name: clean })))
@@ -921,23 +1012,14 @@ export default function CompaniesView({ readOnly = false, isAdmin = false, onSca
       <h2 className="text-xl font-semibold tracking-tight text-dark-100">{t('companies.title')}</h2>
 
       {!readOnly && (
-        <form onSubmit={handleCreate} className="card flex gap-2">
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t('companies.newCompanyPlaceholder')}
-            className="flex-1 bg-white border border-dark-700 rounded-lg px-3 py-2 text-sm text-dark-100 placeholder:text-dark-600 focus:outline-none focus:border-cyber-500 focus:ring-2 focus:ring-cyber-500/20 transition-colors duration-150"
-          />
-          <button
-            type="submit"
-            disabled={creating || !name.trim()}
-            className="px-4 py-2 bg-cyber-600 hover:bg-cyber-700 disabled:opacity-50 text-white font-semibold rounded-lg transition-colors duration-150 text-sm inline-flex items-center gap-1.5"
-          >
-            <Plus className="w-4 h-4" />
-            {creating ? t('companies.creating') : t('companies.create')}
-          </button>
-        </form>
+        <SearchOrCreateBar
+          companies={companies}
+          query={query}
+          onQueryChange={setQuery}
+          onView={onOpenDashboard}
+          onCreate={handleCreate}
+          creating={creating}
+        />
       )}
 
       {error && (
@@ -963,18 +1045,6 @@ export default function CompaniesView({ readOnly = false, isAdmin = false, onSca
         </div>
       ) : (
         <div className="space-y-4">
-          {companies.length > 3 && (
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-dark-500 pointer-events-none" />
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t('companies.filterPlaceholder', 'Filter companies…')}
-                className="w-full bg-white border border-dark-700 rounded-lg pl-9 pr-4 py-2 text-sm text-dark-100 placeholder:text-dark-500 focus:outline-none focus:border-cyber-500 focus:ring-2 focus:ring-cyber-500/20 transition-colors duration-150"
-              />
-            </div>
-          )}
           {visibleCompanies.map((c) => (
             <CompanyCard
               key={c.id}

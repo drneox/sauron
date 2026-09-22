@@ -9,6 +9,7 @@ import asyncio
 import httpx
 import dns.resolver
 import logging
+import re
 from typing import Any
 
 from modules import tools_runner
@@ -175,20 +176,32 @@ async def _run_async(domain: str) -> dict[str, Any]:
     for item in found:
         item["sources"] = sorted(sources_map.get(item["subdomain"], set()))
 
-    # Risk: any sensitive subdomain exposed
+    # Risk: any sensitive subdomain exposed. Matched by whole label token, not
+    # substring — "ci" as a raw substring matches "beneficios"/"servicio"/
+    # "notificaciones" (any Spanish word with that syllable), flooding LATAM
+    # scans with false positives. A token may carry a trailing number
+    # (db1, admin2, web01) since that's a common real naming pattern.
     risk = "low"
     findings = []
     sensitive_keywords = ["admin", "dev", "test", "staging", "internal", "corp", "db",
                            "database", "backup", "old", "legacy", "git", "jenkins", "ci",
                            "kubernetes", "k8s", "docker", "vpn", "intranet"]
+    _sensitive_token_re = {
+        kw: re.compile(rf"^{re.escape(kw)}\d*$") for kw in sensitive_keywords
+    }
 
     for item in found:
-        for keyword in sensitive_keywords:
-            if keyword in item["subdomain"].split(".")[0].lower():
-                item["sensitive"] = True
-                risk = "high"
-                findings.append(f"Sensitive subdomain exposed: {item['subdomain']}")
-                break
+        label = item["subdomain"].split(".")[0].lower()
+        tokens = re.split(r"[-_]+", label)
+        matched_keyword = next(
+            (kw for token in tokens for kw in sensitive_keywords
+             if _sensitive_token_re[kw].match(token)),
+            None,
+        )
+        if matched_keyword:
+            item["sensitive"] = True
+            risk = "high"
+            findings.append(f"Sensitive subdomain exposed: {item['subdomain']}")
         else:
             item["sensitive"] = False
 
