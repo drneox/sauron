@@ -48,6 +48,9 @@ class Domain(Model):
     # Confirmed official app-store developers for the brand, e.g.
     # [{"store": "app_store", "name": "Apple Inc.", "artist_id": "284417353"}]
     app_developers = fields.JSONField(null=True)
+    # Apps rejected in the review workflow — never re-added by future scans:
+    # [{"store": "google_play", "name": "Instagram"}]
+    app_rejections = fields.JSONField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     scans: fields.ReverseRelation["Scan"]

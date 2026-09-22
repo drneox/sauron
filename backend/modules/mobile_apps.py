@@ -77,7 +77,7 @@ def _apple_entry(item: dict) -> dict:
     }
 
 
-def _search_apple(brand: str) -> tuple[list[dict], list[dict]]:
+def _search_apple(brand: str, ai_available: bool = True) -> tuple[list[dict], list[dict]]:
     """Returns (apps, suspicious) from the iTunes Search API."""
     apps: list[dict] = []
     suspicious: list[dict] = []
@@ -95,7 +95,11 @@ def _search_apple(brand: str) -> tuple[list[dict], list[dict]]:
             continue
         if _matches_brand(developer, brand):
             apps.append(entry)
-        else:
+        elif ai_available or _matches_brand(entry["name"], brand):
+            # With AI the LLM classifies every hit (unrelated ones are dropped
+            # at persistence). Without AI, require a brand match in the app
+            # name as the poor-man's classifier — store noise (Google Maps,
+            # Instagram) never enters the inventory.
             suspicious.append(entry)
     return apps, suspicious
 
@@ -115,7 +119,7 @@ def _play_search_html_ids(query: str) -> dict[str, str]:
     return out
 
 
-def _search_google_play(brand: str, locale: dict[str, str] | None = None) -> tuple[list[dict], list[dict]]:
+def _search_google_play(brand: str, locale: dict[str, str] | None = None, ai_available: bool = True) -> tuple[list[dict], list[dict]]:
     """Returns (apps, suspicious) from Google Play via google-play-scraper.
     Raises if the library or the store is unavailable — caller tolerates it."""
     from google_play_scraper import app as gplay_app
@@ -152,9 +156,11 @@ def _search_google_play(brand: str, locale: dict[str, str] | None = None) -> tup
         }
         if not entry["name"]:
             continue
+        # Same rule as Apple: with AI every hit goes to the LLM; without it,
+        # require a brand match in developer or app name.
         if _matches_brand(developer, brand):
             apps.append(entry)
-        else:
+        elif ai_available or _matches_brand(entry["name"], brand):
             suspicious.append(entry)
     return apps, suspicious
 
@@ -340,9 +346,10 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         "findings": [],
     }
     errors: list[str] = []
+    ai_available = bool(os.getenv("AI_API_KEY", "").strip())
 
     try:
-        apps, suspicious = _search_apple(brand)
+        apps, suspicious = _search_apple(brand, ai_available)
         result["apps"].extend(apps)
         result["suspicious"].extend(suspicious)
     except Exception as e:
@@ -350,7 +357,7 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         errors.append(f"app_store: {e}")
 
     try:
-        apps, suspicious = _search_google_play(brand, locale)
+        apps, suspicious = _search_google_play(brand, locale, ai_available)
         result["apps"].extend(apps)
         result["suspicious"].extend(suspicious)
     except Exception as e:
