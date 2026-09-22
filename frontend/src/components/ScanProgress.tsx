@@ -35,7 +35,7 @@ import {
   Zap,
 } from 'lucide-react'
 
-const MODULE_LABELS: Record<string, string> = {
+export const MODULE_LABELS: Record<string, string> = {
   whois:        'WHOIS Lookup',
   dns:          'DNS Enumeration',
   dnssec:       'DNSSEC Validation',

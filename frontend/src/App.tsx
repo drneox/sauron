@@ -3,9 +3,9 @@
 import { useEffect, useState, type ComponentType } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { ScanReport, Company, ScanRequestPayload } from './types/report'
+import { ScanReport, Company } from './types/report'
 import { AuthUser, LoginResponse, clearToken, setToken, setUnauthorizedHandler } from './auth'
-import DomainInput from './components/DomainInput'
+import NewScanView from './components/NewScanView'
 import ScanProgress from './components/ScanProgress'
 import ReportView from './components/ReportView'
 import ScanHistory from './components/ScanHistory'
@@ -92,28 +92,25 @@ function CompanyNotFound() {
   )
 }
 
-function HomePage({ readOnly, onScan }: { readOnly: boolean; onScan: (domain: string, agentMode: boolean) => void }) {
+function ReadOnlyScanNotice() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  if (readOnly) {
-    return (
-      <div className="max-w-md mx-auto card text-center space-y-3 mt-16">
-        <h2 className="text-base font-semibold tracking-tight text-dark-100">{t('nav.readOnlyTitle')}</h2>
-        <p className="text-dark-500 text-sm leading-relaxed">
-          {t('nav.readOnlyBody')}
-        </p>
-        <div className="flex justify-center gap-2">
-          <button onClick={() => navigate('/history')} className="btn-secondary">
-            {t('nav.history')}
-          </button>
-          <button onClick={() => navigate('/companies')} className="btn-secondary">
-            {t('nav.companies')}
-          </button>
-        </div>
+  return (
+    <div className="max-w-md mx-auto card text-center space-y-3 mt-16">
+      <h2 className="text-base font-semibold tracking-tight text-dark-100">{t('nav.readOnlyTitle')}</h2>
+      <p className="text-dark-500 text-sm leading-relaxed">
+        {t('nav.readOnlyBody')}
+      </p>
+      <div className="flex justify-center gap-2">
+        <button onClick={() => navigate('/history')} className="btn-secondary">
+          {t('nav.history')}
+        </button>
+        <button onClick={() => navigate('/companies')} className="btn-secondary">
+          {t('nav.companies')}
+        </button>
       </div>
-    )
-  }
-  return <DomainInput onScan={onScan} />
+    </div>
+  )
 }
 
 function ScanningPage() {
@@ -339,20 +336,6 @@ export default function App() {
     setUser(null)
   }
 
-  const handleScanStart = async (domain: string, agentMode = false) => {
-    try {
-      const payload: ScanRequestPayload = { domain }
-      if (agentMode) payload.agent_mode = true
-      const { data } = await axios.post('/api/scan', payload)
-      navigate(agentMode ? `/agent/${data.scan_id}` : `/scanning/${data.scan_id}`)
-    } catch (err: unknown) {
-      const msg = axios.isAxiosError(err)
-        ? err.response?.data?.detail || err.message
-        : 'Unknown error'
-      alert(t('home.scanStartError', { msg }))
-    }
-  }
-
   if (!authReady) {
     return (
       <div className="min-h-screen bg-dark-950 text-dark-500 flex items-center justify-center text-sm animate-pulse">
@@ -371,12 +354,11 @@ export default function App() {
   const navItems: NavItem[] = [
     { to: '/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
     { to: '/companies', label: t('nav.companies'), icon: Building2 },
-    { to: '/history', label: t('nav.history'), icon: History },
     ...(isAdmin ? [{ to: '/users', label: t('nav.users'), icon: Users }] : []),
     ...(isAdmin ? [{ to: '/settings', label: t('nav.settings'), icon: Settings }] : []),
   ]
 
-  const scanMenuActive = location.pathname === '/scan' || location.pathname === '/agent'
+  const scanMenuActive = ['/scan', '/agent', '/history', '/scanning'].some((p) => location.pathname.startsWith(p))
 
   return (
     <div className="min-h-screen bg-dark-950 text-dark-200">
@@ -415,6 +397,7 @@ export default function App() {
                     {[
                       { to: '/scan', label: t('nav.newScan'), desc: t('nav.newScanDesc'), icon: ScanSearch },
                       { to: '/agent', label: t('nav.agentScan'), desc: t('nav.agentScanDesc'), icon: Bot },
+                      { to: '/history', label: t('nav.history'), desc: t('nav.historyDesc'), icon: History },
                     ].map((opt) => (
                       <button
                         key={opt.to}
@@ -494,7 +477,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 py-8">
         <Routes>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/scan" element={<HomePage readOnly={readOnly} onScan={handleScanStart} />} />
+          <Route path="/scan" element={readOnly ? <ReadOnlyScanNotice /> : <NewScanView />} />
           <Route path="/scanning/:scanId" element={<ScanningPage />} />
           <Route path="/report/:scanId" element={<ReportPage />} />
           <Route path="/dashboard" element={<DashboardPage readOnly={readOnly} />} />
