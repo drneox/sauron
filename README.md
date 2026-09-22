@@ -81,6 +81,10 @@ See [`backend/.env.example`](backend/.env.example) for the full annotated list.
 
 The scanning tools bundled in the backend image keep their own licenses: nuclei, subfinder, httpx, katana and naabu are MIT (ProjectDiscovery); trufflehog is AGPL-3.0 — it is executed as an external CLI binary (mere aggregation), so its copyleft does not extend to Sauron.
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned features and known follow-ups.
+
 ## Credits
 
 Built by **Carlos Ganoza**.
