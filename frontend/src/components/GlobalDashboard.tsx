@@ -374,12 +374,55 @@ function GlobalDiffResult({ diff, showCompany = true }: { diff: GlobalAssetsDiff
       || (diff.removed?.[c]?.length ?? 0) > 0
       || (diff.modified?.[c]?.length ?? 0) > 0,
   )
+  const totals = DIFF_ORDER.reduce(
+    (acc, c) => ({
+      added: acc.added + (diff.added?.[c]?.length ?? 0),
+      removed: acc.removed + (diff.removed?.[c]?.length ?? 0),
+      modified: acc.modified + (diff.modified?.[c]?.length ?? 0),
+    }),
+    { added: 0, removed: 0, modified: 0 },
+  )
 
   return (
     <div className="space-y-4">
       <div className="space-y-2">
         <span className="text-xs text-dark-500 uppercase tracking-wider font-semibold">{t('dashboard.scoreChangeByCompany')}</span>
         <ScoreChangeList changes={diff.score_changes} />
+      </div>
+
+      {/* Asset delta summary — discovered/removed/modified totals per category */}
+      <div className="space-y-2">
+        <span className="text-xs text-dark-500 uppercase tracking-wider font-semibold">{t('dashboard.assetDeltaSummary')}</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border bg-emerald-50 border-emerald-200 text-emerald-700 text-xs font-semibold font-mono">
+            +{totals.added} {t('dashboard.deltaDiscovered')}
+          </span>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border bg-red-50 border-red-200 text-red-700 text-xs font-semibold font-mono">
+            −{totals.removed} {t('dashboard.deltaRemoved')}
+          </span>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border bg-amber-50 border-amber-200 text-amber-700 text-xs font-semibold font-mono">
+            ~{totals.modified} {t('dashboard.deltaModified')}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {categories.map((c) => {
+            const a = diff.added?.[c]?.length ?? 0
+            const r = diff.removed?.[c]?.length ?? 0
+            const m = diff.modified?.[c]?.length ?? 0
+            return (
+              <span key={c} className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-dark-900 text-[11px] text-dark-300">
+                {t(`dashboard.categories.${c}`)}
+                <span className="font-mono">
+                  {a > 0 && <span className="text-emerald-600">+{a}</span>}
+                  {a > 0 && (r > 0 || m > 0) && ' '}
+                  {r > 0 && <span className="text-red-600">−{r}</span>}
+                  {r > 0 && m > 0 && ' '}
+                  {m > 0 && <span className="text-amber-600">~{m}</span>}
+                </span>
+              </span>
+            )
+          })}
+        </div>
       </div>
 
       {diff.skipped_companies.length > 0 && (

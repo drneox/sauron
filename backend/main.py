@@ -819,6 +819,26 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
     ]
 
     module_allowlist = SCANS[scan_id].get("modules_allowlist") or []
+    # Planned module list — what this scan will actually run, so the progress
+    # UI can show exactly these (no ghost rows for modules that don't apply).
+    planned: list[str] = []
+    for name, _func, _progress in modules:
+        if kind == "discover" and name not in DISCOVER_MODULES:
+            continue
+        if kind == "host" and name not in HOST_SCAN_MODULES:
+            continue
+        if kind == "module" and name not in module_allowlist:
+            continue
+        if SCANS[scan_id].get("skip_discovery") and name in SKIP_ON_VULN_ONLY:
+            continue
+        if kind != "module" and enabled_modules.get(name) is False:
+            continue
+        planned.append(name)
+        if name == "subdomains" and kind == "full":
+            planned.append("subdomain_eval")
+    if SCANS[scan_id].get("agent_mode"):
+        planned.append("agent")
+    SCANS[scan_id]["planned_modules"] = planned
     for name, func, progress in modules:
         if SCANS[scan_id].get("stop_requested"):
             logger.info(f"[{scan_id}] Stop requested — halting before module {name}")
@@ -2124,6 +2144,10 @@ async def get_scan(scan_id: str, req: Request):
                 "phase": "agent" if scan["current_module"] == "agent" else "scan",
                 "kind": scan.get("kind", "full"),
             }
+            if scan.get("started_at"):
+                payload["started_at"] = scan["started_at"]
+            if scan.get("planned_modules") is not None:
+                payload["planned_modules"] = scan["planned_modules"]
             if scan.get("agent_steps") is not None:
                 payload["agent_steps"] = scan["agent_steps"]
             return payload

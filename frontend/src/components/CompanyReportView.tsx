@@ -18,6 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { AssetSummary, Company } from '../types/report'
+import { getToken } from '../auth'
 import { PAGE_SIZE, Pager, RiskBadge } from './ui'
 
 interface FindingRow {
@@ -105,6 +106,32 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
   const [assets, setAssets] = useState<AssetSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [downloadingPdf, setDownloadingPdf] = useState(false)
+
+  const handleDownloadPdf = async () => {
+    setDownloadingPdf(true)
+    try {
+      const res = await fetch(`/api/companies/${company.id}/report.pdf`, {
+        headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+      })
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`
+        try { const j = await res.json(); detail = j.detail || detail } catch {}
+        throw new Error(detail)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `sauron_${company.name.replace(/[^a-z0-9]+/gi, '_')}.pdf`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      alert(t('report.pdfError', { msg: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setDownloadingPdf(false)
+    }
+  }
 
   const load = async () => {
     setLoading(true)
@@ -163,13 +190,13 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
             ))}
           </div>
         )}
-        <a
-          href={`/api/companies/${company.id}/report.pdf`}
-          download
-          className="btn-secondary inline-flex items-center gap-1.5"
+        <button
+          onClick={handleDownloadPdf}
+          disabled={downloadingPdf}
+          className="btn-secondary inline-flex items-center gap-1.5 disabled:opacity-50"
         >
           <Download className="w-4 h-4" /> {t('companyReport.downloadPdf')}
-        </a>
+        </button>
       </div>
 
       {error && (
