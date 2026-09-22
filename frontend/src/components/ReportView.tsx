@@ -121,7 +121,7 @@ export default function ReportView({ report, onNewScan }: Props) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <ScoreCard scorecard={scorecard} modules={modules} />
         <div className="lg:col-span-2">
-          <FindingsPanel findings={findings} />
+          <FindingsPanel findings={findings} baseUrl={`https://${report.domain}`} />
         </div>
       </div>
 

@@ -929,6 +929,9 @@ export interface AppSettings {
   chain_eval_max_targets?: number
   chain_eval_fuzz?: boolean
   chain_eval_scope?: 'new' | 'all'
+  fanout_enabled?: boolean
+  fanout_max_targets?: number
+  fanout_scope?: 'new' | 'changed' | 'new_or_changed' | 'all_alive'
   ai_domain_suggestions?: boolean
   agent_mode_default?: boolean
   auto_discover_domains?: boolean

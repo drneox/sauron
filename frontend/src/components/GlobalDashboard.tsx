@@ -917,18 +917,18 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
         <div className="card flex flex-wrap items-center gap-3 py-3">
           {locked ? (
             <span className="chip bg-cyan-50 text-cyan-700 border-cyan-200">{locked.name}</span>
-          ) : (
-            <select
-              value={companyFilter}
-              onChange={(e) => setCompanyFilter(e.target.value)}
-              className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150 max-w-[220px]"
-            >
-              <option value="">{t('dashboard.allCompanies')}</option>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
-          )}
+          ) : selectedCompany ? (
+            <span className="chip bg-cyan-50 text-cyan-700 border-cyan-200 inline-flex items-center gap-1.5">
+              {selectedCompany.name}
+              <button
+                onClick={() => setCompanyFilter('')}
+                className="hover:text-cyan-900 transition-colors"
+                title={t('dashboard.clearCompanyFilter')}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ) : null}
           <input
             type="text"
             value={search}
@@ -1052,9 +1052,17 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
         </div>
       ) : (
         <>
-          {/* Rating trend (locked company) / Portfolio (global) — above the cards */}
-          {locked && <RatingTrendCard companyId={locked.id} />}
-          {!locked && <PortfolioSection companies={companies} onOpenCompany={onOpenCompany} />}
+          {/* Rating trend for the active company (locked, or picked from the
+              filter dropdown) / Portfolio across every company otherwise —
+              this must track the same selection the dropdown drives, or the
+              two controls look disconnected. */}
+          {activeCompany && <RatingTrendCard companyId={activeCompany.id} />}
+          {!activeCompany && (
+            <PortfolioSection
+              companies={companies}
+              onOpenCompany={(c) => setCompanyFilter(String(c.id))}
+            />
+          )}
 
           {/* Summary cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

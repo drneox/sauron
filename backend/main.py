@@ -628,6 +628,7 @@ MODULE_SCAN_MAX = 5
 SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hours",
                  "chain_eval_enabled", "chain_eval_max_targets",
                  "chain_eval_fuzz", "chain_eval_scope",
+                 "fanout_enabled", "fanout_max_targets", "fanout_scope",
                  "agent_mode_default", "auto_discover_domains",
                  "smart_fuzz_enabled", "smart_fuzz_max_requests",
                  "tools_subfinder", "tools_httpx", "tools_katana",
@@ -639,6 +640,15 @@ DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_DISCOVER_INTERVAL_HOURS = 720  # 30 days
 DEFAULT_CHAIN_EVAL_MAX = 10
+DEFAULT_FANOUT_MAX = 5
+# Cap on modules running concurrently against one target within a single
+# scan — stays polite to the target (no unbounded burst of ~28 simultaneous
+# requests) while still gaining most of the parallel-execution speedup.
+# Compounds with SCAN_WORKERS (how many whole scans run at once): worst case
+# is SCAN_WORKERS * MODULE_CONCURRENCY simultaneous requests system-wide,
+# converging on one target if those scans happen to share a domain (e.g. a
+# full scan plus the host scans fan-out queued for its subdomains).
+MODULE_CONCURRENCY = int(os.getenv("MODULE_CONCURRENCY", "6"))
 DEFAULT_SMART_FUZZ_MAX_REQUESTS = 2000
 SMART_FUZZ_MAX_REQUESTS_CAP = 10000
 
@@ -661,6 +671,9 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
     chain_max = stored.get("chain_eval_max_targets")
     chain_fuzz = stored.get("chain_eval_fuzz")
     chain_scope = stored.get("chain_eval_scope")
+    fanout_enabled = stored.get("fanout_enabled")
+    fanout_max = stored.get("fanout_max_targets")
+    fanout_scope = stored.get("fanout_scope")
     agent_mode_default = stored.get("agent_mode_default")
     auto_discover = stored.get("auto_discover_domains")
     fuzz_enabled = stored.get("smart_fuzz_enabled")
@@ -682,6 +695,14 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "chain_eval_max_targets": chain_max if isinstance(chain_max, int) and 1 <= chain_max <= 50 else DEFAULT_CHAIN_EVAL_MAX,
         "chain_eval_fuzz": chain_fuzz if isinstance(chain_fuzz, bool) else True,
         "chain_eval_scope": chain_scope if chain_scope in ("new", "all") else "new",
+        # Fan-out: after a full scan, automatically queue deep host scans
+        # (kind="host", the full HOST_SCAN_MODULES set) for qualifying
+        # subdomains — closes the loop between discovery and deep evaluation.
+        # Off by default: unlike chain_eval's light inline probe, this queues
+        # full separate scans and meaningfully increases scan volume.
+        "fanout_enabled": fanout_enabled if isinstance(fanout_enabled, bool) else False,
+        "fanout_max_targets": fanout_max if isinstance(fanout_max, int) and 1 <= fanout_max <= 30 else DEFAULT_FANOUT_MAX,
+        "fanout_scope": fanout_scope if fanout_scope in ("new", "changed", "new_or_changed", "all_alive") else "new_or_changed",
         "agent_mode_default": agent_mode_default if isinstance(agent_mode_default, bool) else False,
         "auto_discover_domains": auto_discover if isinstance(auto_discover, bool) else False,
         "smart_fuzz_enabled": fuzz_enabled if isinstance(fuzz_enabled, bool) else True,
@@ -772,7 +793,7 @@ def _chained_eval_step(scan_id: str, domain: str, subdomains_result: dict,
                 "alive_count": 0, "secret_verification": None, "risk": "low", "findings": []}
 
 
-def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | None = None) -> dict:
+async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | None = None) -> dict:
     SCANS[scan_id]["status"] = "running"
     kind = SCANS[scan_id].get("kind", "full")
     enabled_modules = (settings or {}).get("enabled_modules") or {}
@@ -806,42 +827,49 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
         return smart_fuzz.run(d, wordlist="auto", max_requests=max_req,
                               tech_hints=tech_hints, known_endpoints=known[:50])
 
+    # Tier 0: every module here is independent of every other — none reads
+    # another module's `results` entry — so they can all run concurrently.
+    # Tier 1 (below) reads tier-0 output (tech/js_secrets) and must wait for
+    # tier 0 to fully finish first. Within a tier, order is irrelevant.
     modules = [
-        ("whois",      whois_lookup.run,    4),
-        ("dns",        dns_enum.run,         8),
-        ("dnssec",     dnssec_check.run,    11),
-        ("subdomains", subdomain_enum.run,  17),   # passive DNS / crt.sh before HTTP probing
-        ("ssl",        ssl_check.run,       21),
-        ("tls",        tls_audit.run,       24),
-        ("headers",    headers_check.run,   28),
-        ("cors",       cors_check.run,      32),
-        ("cookies",    cookie_security.run, 36),
-        ("email",      email_security.run,  40),
-        ("tech",       tech_fingerprint.run,44),
-        ("mobile_apps", _mobile_apps_run,   46),
-        ("waf",        waf_detect.run,      48),
-        ("robots",     robots_sitemap.run,  52),
-        ("admin",        admin_discovery.run,  58),
-        ("frontend_cve", frontend_cve.run,     62),
-        ("js_secrets",   js_secrets.run,       66),
-        ("secret_verification", _secret_verification_run, 67),
-        ("smart_fuzz", _smart_fuzz_run,   69),   # active probing: also runs in discovery passes (surface mapping)
-        ("blacklist",  blacklist_check.run, 70),
-        ("exposed",    exposed_files.run,   76),
-        ("breach",        breach_check.run,         82),
-        ("cloud_storage", cloud_metadata.run,       86),
-        ("api_exposure",  api_exposure.run,           89),
-        ("wayback",       wayback_secrets.run,        92),
-        ("ports",         port_scan.run,              95),
-        ("reverse_ip",    reverse_ip.run,             96),
-        ("nuclei",        nuclei_integration.run,     98),
+        ("whois",      whois_lookup.run),
+        ("dns",        dns_enum.run),
+        ("dnssec",     dnssec_check.run),
+        ("subdomains", subdomain_enum.run),   # triggers chained subdomain_eval on completion
+        ("ssl",        ssl_check.run),
+        ("tls",        tls_audit.run),
+        ("headers",    headers_check.run),
+        ("cors",       cors_check.run),
+        ("cookies",    cookie_security.run),
+        ("email",      email_security.run),
+        ("tech",       tech_fingerprint.run),
+        ("mobile_apps", _mobile_apps_run),
+        ("waf",        waf_detect.run),
+        ("robots",     robots_sitemap.run),
+        ("admin",        admin_discovery.run),
+        ("frontend_cve", frontend_cve.run),
+        ("js_secrets",   js_secrets.run),
+        ("blacklist",  blacklist_check.run),
+        ("exposed",    exposed_files.run),
+        ("breach",        breach_check.run),
+        ("cloud_storage", cloud_metadata.run),
+        ("api_exposure",  api_exposure.run),
+        ("wayback",       wayback_secrets.run),
+        ("ports",         port_scan.run),
+        ("reverse_ip",    reverse_ip.run),
+        ("nuclei",        nuclei_integration.run),
     ]
+    tier1_modules = [
+        ("secret_verification", _secret_verification_run),   # needs js_secrets
+        ("smart_fuzz",          _smart_fuzz_run),             # needs tech + js_secrets
+    ]
+    all_modules = modules + tier1_modules
 
     module_allowlist = SCANS[scan_id].get("modules_allowlist") or []
     # Planned module list — what this scan will actually run, so the progress
     # UI can show exactly these (no ghost rows for modules that don't apply).
     planned: list[str] = []
-    for name, _func, _progress in modules:
+    for name, _func in all_modules:
         if kind == "discover" and name not in DISCOVER_MODULES:
             continue
         if kind == "host" and name not in HOST_SCAN_MODULES:
@@ -858,22 +886,26 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
     if SCANS[scan_id].get("agent_mode"):
         planned.append("agent")
     SCANS[scan_id]["planned_modules"] = planned
-    for name, func, progress in modules:
-        if SCANS[scan_id].get("stop_requested"):
-            logger.info(f"[{scan_id}] Stop requested — halting before module {name}")
-            raise _ScanStopped()
+
+    # Concurrency cap: modules probe the SAME target, so an unbounded burst of
+    # ~28 simultaneous requests would be both impolite and WAF-bait. This caps
+    # how many modules are in flight at once — still a large win over strictly
+    # sequential execution, since most modules are I/O-bound (network calls).
+    semaphore = asyncio.Semaphore(MODULE_CONCURRENCY)
+
+    async def run_module(name: str, func) -> None:
         if kind == "discover" and name not in DISCOVER_MODULES:
-            continue
+            return
         # Host scans evaluate a single host: skip discovery-scope modules.
         if kind == "host" and name not in HOST_SCAN_MODULES:
-            continue
+            return
         # Module scans run only the explicitly requested modules.
         if kind == "module" and name not in module_allowlist:
-            continue
+            return
         # Vulnerability-only scan: skip pure surface-mapping modules
         if SCANS[scan_id].get("skip_discovery") and name in SKIP_ON_VULN_ONLY:
             results[name] = {"status": "skipped", "reason": "skip_discovery", "findings": [], "risk": "low"}
-            continue
+            return
         # The enabled_modules settings filter does NOT apply to module scans:
         # the user's explicit request is the intent (a module that cannot run
         # at all, e.g. missing nuclei binary, still degrades to "skipped"
@@ -881,39 +913,56 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
         if kind != "module" and enabled_modules.get(name) is False:
             logger.info(f"[{scan_id}] Module {name} disabled in settings — skipped")
             results[name] = {"status": "skipped", "findings": [], "risk": "low"}
-            continue
-        SCANS[scan_id]["current_module"] = name
-        SCANS[scan_id]["progress"] = progress
-        start = time.time()
-        try:
-            logger.info(f"[{scan_id}] Running module: {name}")
-            results[name] = func(domain)
-            if name == "js_secrets":
-                handoff["raw"] = results[name].pop("_raw", None)
-            elapsed = round(time.time() - start, 2)
-            logger.info(f"[{scan_id}] {name} completed in {elapsed}s")
-        except Exception as e:
-            logger.error(f"[{scan_id}] Module {name} crashed: {e}")
-            results[name] = {"status": "error", "error": str(e)}
-        # Live feed for the progress UI: one entry per finished module.
-        mod_res = results.get(name) or {}
-        SCANS[scan_id].setdefault("modules_done", []).append({
-            "name": name,
-            "status": mod_res.get("status", "ok"),
-            "findings": len(mod_res.get("findings") or []),
-            "risk": mod_res.get("risk", "low"),
-            "duration": round(time.time() - start, 2),
-        })
-        if on_module_done is not None and name in ASSET_PRODUCING_MODULES:
+            return
+        async with semaphore:
+            SCANS[scan_id].setdefault("current_modules", set()).add(name)
+            SCANS[scan_id]["current_module"] = name  # best-effort single-name label; see current_modules for the full set
+            start = time.time()
             try:
-                on_module_done(name, dict(results))
-            except Exception:
-                logger.exception(f"[{scan_id}] Incremental asset upsert failed after {name}")
-        # Chained evaluation: right after enumeration, give the newly discovered
-        # subdomains a light eval (full scans only; see _chained_eval_step).
-        if name == "subdomains" and kind == "full":
-            results["subdomain_eval"] = _chained_eval_step(
-                scan_id, domain, results["subdomains"], settings, enabled_modules)
+                logger.info(f"[{scan_id}] Running module: {name}")
+                results[name] = await asyncio.to_thread(func, domain)
+                if name == "js_secrets":
+                    handoff["raw"] = results[name].pop("_raw", None)
+                elapsed = round(time.time() - start, 2)
+                logger.info(f"[{scan_id}] {name} completed in {elapsed}s")
+            except Exception as e:
+                logger.error(f"[{scan_id}] Module {name} crashed: {e}")
+                results[name] = {"status": "error", "error": str(e)}
+            SCANS[scan_id]["current_modules"].discard(name)
+            # Live feed for the progress UI: one entry per finished module.
+            mod_res = results.get(name) or {}
+            done = SCANS[scan_id].setdefault("modules_done", [])
+            done.append({
+                "name": name,
+                "status": mod_res.get("status", "ok"),
+                "findings": len(mod_res.get("findings") or []),
+                "risk": mod_res.get("risk", "low"),
+                "duration": round(time.time() - start, 2),
+            })
+            # Count-based progress: module weights only made sense for strictly
+            # sequential execution. Capped below 100 — the final jump to 100
+            # happens once the whole scan (agent phase included) is done.
+            SCANS[scan_id]["progress"] = min(98, round(len(done) / max(len(planned), 1) * 100))
+            if on_module_done is not None and name in ASSET_PRODUCING_MODULES:
+                try:
+                    await on_module_done(name, dict(results))
+                except Exception:
+                    logger.exception(f"[{scan_id}] Incremental asset upsert failed after {name}")
+            # Chained evaluation: right after enumeration, give the newly discovered
+            # subdomains a light eval (full scans only; see _chained_eval_step).
+            if name == "subdomains" and kind == "full":
+                results["subdomain_eval"] = await asyncio.to_thread(
+                    _chained_eval_step, scan_id, domain, results["subdomains"], settings, enabled_modules)
+
+    if SCANS[scan_id].get("stop_requested"):
+        logger.info(f"[{scan_id}] Stop requested — halting before tier 0")
+        raise _ScanStopped()
+    await asyncio.gather(*(run_module(name, func) for name, func in modules))
+
+    if SCANS[scan_id].get("stop_requested"):
+        logger.info(f"[{scan_id}] Stop requested — halting before tier 1")
+        raise _ScanStopped()
+    await asyncio.gather(*(run_module(name, func) for name, func in tier1_modules))
 
     # Aggregate summary — each step degrades independently instead of killing the scan
     all_findings = []
@@ -965,7 +1014,7 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
     # scans only get it in agent_mode.
     if kind == "full" or (kind == "host" and SCANS[scan_id].get("agent_mode")):
         try:
-            result["ai_summary"] = ai_summary.run(result)
+            result["ai_summary"] = await asyncio.to_thread(ai_summary.run, result)
         except Exception as e:
             logger.error(f"[{scan_id}] ai_summary crashed: {e}")
             result["ai_summary"] = {"status": "error", "error": str(e)}
@@ -978,7 +1027,8 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
     if SCANS[scan_id].get("agent_mode"):
         SCANS[scan_id].update({"current_module": "agent", "progress": 99, "agent_steps": []})
         try:
-            agent_result = agent_scan.run(
+            agent_result = await asyncio.to_thread(
+                agent_scan.run,
                 domain,
                 result,
                 max_steps=SCANS[scan_id].get("max_steps")
@@ -1055,13 +1105,9 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
         SCANS[scan_id]["prev_subdomains"] = (
             sorted(_extract_subdomains(prev.result)) if prev and prev.result else []
         )
-    loop = asyncio.get_running_loop()
-
-    def on_module_done(module_name: str, results_so_far: dict) -> None:
-        coro = _upsert_assets_incremental(dom, results_so_far, scan_id)
-        future = asyncio.run_coroutine_threadsafe(coro, loop)
+    async def on_module_done(module_name: str, results_so_far: dict) -> None:
         try:
-            future.result(timeout=60)
+            await _upsert_assets_incremental(dom, results_so_far, scan_id)
         except Exception:
             logger.exception(f"[{scan_id}] Incremental asset upsert failed after {module_name}")
 
@@ -1073,7 +1119,7 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
         return
 
     try:
-        result = await asyncio.to_thread(_run_scan, scan_id, domain, on_module_done, settings)
+        result = await _run_scan(scan_id, domain, on_module_done, settings)
     except _ScanStopped:
         logger.info(f"[{scan_id}] Scan stopped by user")
         await Scan.filter(id=scan_id).update(
@@ -1569,6 +1615,81 @@ def _sanitize_json(obj: Any) -> Any:
     return obj
 
 
+async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
+    """After a full scan completes, automatically queue deep host scans
+    (kind="host", the full HOST_SCAN_MODULES set — ~19 modules) for
+    qualifying subdomains. Closes the loop between discovery (a full scan
+    finds/updates hosts) and deep per-host evaluation, which today only
+    happens when someone clicks "host scan" by hand on one asset at a time.
+    The apex domain itself is never a fan-out target — the full scan that
+    just ran already covers it at HOST_SCAN_MODULES-equivalent depth.
+
+    Eligibility is always gated on "alive" (DNS-active per this scan's fresh
+    subdomain enumeration); within that, fanout_scope narrows to the hosts
+    actually worth a fresh deep look:
+      - "new":            hosts this scan discovered for the first time
+                           (Asset.first_seen_scan_id == this scan)
+      - "changed":         hosts whose Asset metadata changed this scan
+                           (new IP, new open port, new http_status…) — the
+                           same AssetHistory rows that power the company
+                           assets-diff view, so "changed" means the same
+                           thing here as it does in that UI
+      - "new_or_changed":  union of both (default)
+      - "all_alive":       every DNS-active host, every full scan
+    Capped at fanout_max_targets; hosts already queued/running are skipped
+    so a burst of rescans never piles up duplicate host scans.
+    """
+    if result.get("kind") != "full" or result.get("status") == "error":
+        return
+    settings = await _load_settings()
+    if not settings.get("fanout_enabled", False):
+        return
+
+    subdomains_result = (result.get("modules") or {}).get("subdomains") or {}
+    entries = subdomains_result.get("subdomains") or []
+    alive = {
+        s["subdomain"] for s in entries
+        if isinstance(s, dict) and s.get("status") == "active" and s.get("subdomain")
+    }
+    if not alive:
+        return
+
+    scope = settings.get("fanout_scope", "new_or_changed")
+    if scope == "all_alive":
+        targets = set(alive)
+    else:
+        new_set: set[str] = set()
+        changed_set: set[str] = set()
+        if scope in ("new", "new_or_changed"):
+            new_rows = await Asset.filter(domain_id=dom.id, type="subdomain", first_seen_scan_id=scan_id)
+            new_set = {a.value for a in new_rows}
+        if scope in ("changed", "new_or_changed"):
+            history_rows = await AssetHistory.filter(scan_id=scan_id).select_related("asset")
+            changed_set = {h.asset.value for h in history_rows if h.asset.type == "subdomain"}
+        targets = (new_set | changed_set) & alive
+
+    if not targets:
+        return
+
+    cap = settings.get("fanout_max_targets") or DEFAULT_FANOUT_MAX
+    in_flight = {s.get("domain") for s in SCANS.values() if s.get("status") in ("queued", "running")}
+    queued = 0
+    for host in sorted(targets):
+        if queued >= cap:
+            break
+        if host in in_flight:
+            continue
+        host_scan_id = _create_scan_entry(host, dom.id, kind="host")
+        await _insert_queued_scan(host_scan_id, host, dom.id)
+        await scan_queue.enqueue(host_scan_id, host, dom.id)
+        queued += 1
+    if queued:
+        logger.info(
+            f"[{scan_id}] Fan-out: queued {queued} host scan(s) for {dom.domain} "
+            f"(scope={scope}, {len(targets)} eligible, cap={cap})"
+        )
+
+
 async def _persist_completed_scan(scan_id: str, domain: str, domain_id: int | None, result: dict) -> None:
     result = _sanitize_json(result)
     dom = await Domain.get_or_none(id=domain_id) if domain_id is not None else None
@@ -1625,6 +1746,13 @@ async def _persist_completed_scan(scan_id: str, domain: str, domain_id: int | No
         await asyncio.to_thread(notify.notify_scan_completed, result, result.get("changes"))
     except Exception:
         logger.exception(f"[{scan_id}] Notification step failed")
+
+    # Fan-out — best-effort, must never break the pipeline. Runs after
+    # persistence so the AssetHistory rows for "changed" detection exist.
+    try:
+        await _fanout_host_scans(scan_id, dom, result)
+    except Exception:
+        logger.exception(f"[{scan_id}] Fan-out step failed")
 
 
 async def _persist_failed_scan(scan_id: str, domain: str, domain_id: int | None, error: str) -> None:
@@ -3924,6 +4052,9 @@ class SettingsUpdateRequest(BaseModel):
     chain_eval_max_targets: int | None = None
     chain_eval_fuzz: bool | None = None
     chain_eval_scope: str | None = None
+    fanout_enabled: bool | None = None
+    fanout_max_targets: int | None = None
+    fanout_scope: str | None = None
     ai_domain_suggestions: bool | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
@@ -3950,6 +4081,20 @@ class SettingsUpdateRequest(BaseModel):
     def validate_chain_scope(cls, v: str | None) -> str | None:
         if v is not None and v not in ("new", "all"):
             raise ValueError("chain_eval_scope must be 'new' or 'all'")
+        return v
+
+    @field_validator("fanout_max_targets")
+    @classmethod
+    def validate_fanout_max(cls, v: int | None) -> int | None:
+        if v is not None and not (1 <= v <= 30):
+            raise ValueError("fanout_max_targets must be 1..30")
+        return v
+
+    @field_validator("fanout_scope")
+    @classmethod
+    def validate_fanout_scope(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("new", "changed", "new_or_changed", "all_alive"):
+            raise ValueError("fanout_scope must be 'new', 'changed', 'new_or_changed' or 'all_alive'")
         return v
 
     @field_validator("default_interval_hours")
@@ -4001,6 +4146,9 @@ async def update_settings(request: SettingsUpdateRequest):
         "chain_eval_max_targets": request.chain_eval_max_targets,
         "chain_eval_fuzz": request.chain_eval_fuzz,
         "chain_eval_scope": request.chain_eval_scope,
+        "fanout_enabled": request.fanout_enabled,
+        "fanout_max_targets": request.fanout_max_targets,
+        "fanout_scope": request.fanout_scope,
         "ai_domain_suggestions": request.ai_domain_suggestions,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,

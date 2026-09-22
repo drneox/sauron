@@ -182,7 +182,7 @@ export default function PortfolioSection({ companies, onOpenCompany }: Props) {
                         key={r.company.id}
                         onClick={() => onOpenCompany(r.company)}
                         className="hover:bg-dark-800/40 cursor-pointer"
-                        title={t('dashboard.openDashboardTitle', { name: r.company.name })}
+                        title={t('dashboard.filterToCompanyTitle', { name: r.company.name })}
                       >
                         <td className="px-3 py-2">
                           <span className="text-cyber-700 font-semibold break-all">{r.company.name}</span>

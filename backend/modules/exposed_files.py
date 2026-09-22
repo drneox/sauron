@@ -590,7 +590,7 @@ async def _probe(
             final_severity = severity if bypass_confirmed else _downgrade(severity)
             confidence = "confirmed" if bypass_confirmed else "medium"
 
-            return _make_result(
+            result = _make_result(
                 path, bypass_url or url,
                 200 if bypass_confirmed else 403,
                 body_size, None,
@@ -598,6 +598,15 @@ async def _probe(
                 final_severity, bypass_snippet,
                 confidence=confidence,
             )
+            # Internal only, stripped in _run_async: lets the orchestrator
+            # cross-check this 403 body against every OTHER path's 403 body
+            # from the same run (see WALL_MIN_HITS below) — a same-run wall
+            # the 5-probe random baseline can't catch, since it only samples
+            # random junk paths, never these deliberately sensitive-looking
+            # ones a WAF is more likely to blanket-block by pattern.
+            if not bypass_confirmed:
+                result["_hash"] = body_hash
+            return result
 
         # ── 401 ───────────────────────────────────────────────────────────────
         elif code == 401:
@@ -668,6 +677,33 @@ async def _run_async(domain: str) -> dict[str, Any]:
         results = await asyncio.gather(*tasks)
 
     found = [r for r in results if r is not None]
+
+    # Same-run wall check: several sensitive-looking paths returning a
+    # byte-identical 403 body is a WAF/catch-all blocking by pattern, not
+    # confirmation that each one is a real file — the 5-probe random
+    # baseline can't catch this because it only samples random junk, never
+    # these deliberately sensitive-looking paths a WAF is more likely to
+    # blanket-block. WALL_MIN_HITS=3 (not 2) so two genuinely related real
+    # files sharing one legitimate "Forbidden" page aren't wrongly dropped.
+    WALL_MIN_HITS = 3
+    hash_counts: dict[str, int] = {}
+    for f in found:
+        h = f.get("_hash")
+        if h:
+            hash_counts[h] = hash_counts.get(h, 0) + 1
+    wall_hashes = {h for h, c in hash_counts.items() if c >= WALL_MIN_HITS}
+    suppressed_count = 0
+    if wall_hashes:
+        suppressed_count = sum(1 for f in found if f.get("_hash") in wall_hashes)
+        logger.info(
+            f"[exposed] {domain}: suppressing {suppressed_count} 403 hit(s) "
+            f"sharing an identical body across {len(wall_hashes)} signature(s) "
+            "— WAF/catch-all wall, not confirmed files"
+        )
+        found = [f for f in found if f.get("_hash") not in wall_hashes]
+    for f in found:
+        f.pop("_hash", None)
+
     # Sort: severity desc, then confidence (confirmed > high > medium)
     _conf_order = {"confirmed": 0, "high": 1, "medium": 2}
     found.sort(key=lambda x: (
@@ -695,6 +731,11 @@ async def _run_async(domain: str) -> dict[str, Any]:
         findings.append(
             "[INFO] Scanner blocked by WAF (block page detected during baseline) — "
             "403-based exposures suppressed as unreliable this run"
+        )
+    if suppressed_count:
+        findings.append(
+            f"[INFO] Suppressed {suppressed_count} sensitive-path 403 hit(s) sharing an "
+            "identical response body — WAF/catch-all wall, not confirmed as real files"
         )
 
     return {

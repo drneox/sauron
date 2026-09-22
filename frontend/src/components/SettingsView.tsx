@@ -10,6 +10,7 @@ import {
   Bot,
   Clock,
   Cloud,
+  GitFork,
   Globe,
   KeyRound,
   Languages,
@@ -210,6 +211,24 @@ export default function SettingsView() {
     }
   }
 
+  const saveFanout = async (patch: {
+    fanout_enabled?: boolean
+    fanout_max_targets?: number
+    fanout_scope?: 'new' | 'changed' | 'new_or_changed' | 'all_alive'
+  }) => {
+    if (!settings) return
+    const prev = settings
+    setSettings({ ...settings, ...patch } as AppSettings)
+    try {
+      const { data } = await axios.put<AppSettings>('/api/settings', patch)
+      setSettings(data)
+      setError('')
+    } catch (err) {
+      setSettings(prev)
+      setError(errorMessage(err, t('settings.fanoutError')))
+    }
+  }
+
   const saveScanning = async (patch: {
     vuln_scan_enabled?: boolean
     discovery_enabled?: boolean
@@ -301,14 +320,14 @@ export default function SettingsView() {
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-2">
                     {g.modules.map((key) => (
-                      <div key={key} className="flex items-center justify-between gap-3 py-1">
-                        <span className="text-sm text-dark-200 truncate" title={key}>
-                          {moduleLabel(key)}
-                        </span>
+                      <div key={key} className="flex items-center gap-2.5 py-1 min-w-0">
                         <Switch
                           checked={!!enabledModules[key]}
                           onChange={(next) => toggleModule(key, next)}
                         />
+                        <span className="text-sm text-dark-200 truncate" title={key}>
+                          {moduleLabel(key)}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -423,6 +442,61 @@ export default function SettingsView() {
                   <span className="text-sm text-dark-200">{t('settings.aiDomainSuggToggle')}</span>
                   <p className="text-xs text-dark-500 leading-relaxed">{t('settings.aiDomainSuggDesc')}</p>
                 </div>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Fan-out: deep host scans queued automatically after a full scan */}
+          <SectionCard title={t('settings.fanoutTitle')} icon={<GitFork />}>
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Switch
+                  checked={settings.fanout_enabled ?? false}
+                  onChange={(next) => saveFanout({ fanout_enabled: next })}
+                />
+                <span className="text-sm text-dark-200">
+                  {t('settings.fanoutToggle')}
+                </span>
+              </div>
+              <p className="text-xs text-dark-500 leading-relaxed">
+                {t('settings.fanoutDesc')}
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="text-sm text-dark-500" htmlFor="fanout-max">
+                  {t('settings.fanoutMax')}
+                </label>
+                <input
+                  id="fanout-max"
+                  type="number"
+                  min={1}
+                  max={30}
+                  defaultValue={settings.fanout_max_targets ?? 5}
+                  onBlur={(e) => {
+                    const n = Math.round(Number(e.target.value))
+                    if (Number.isFinite(n) && n >= 1 && n <= 30) saveFanout({ fanout_max_targets: n })
+                  }}
+                  className="w-20 bg-white border border-dark-700 rounded-lg px-3 py-1.5 text-sm text-dark-100 font-mono focus:outline-none focus:border-cyber-500 focus:ring-2 focus:ring-cyber-500/20 transition-colors duration-150"
+                />
+                <span className="text-xs text-dark-500">{t('settings.fanoutMaxHint')}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="text-sm text-dark-500" htmlFor="fanout-scope">
+                  {t('settings.fanoutScope')}
+                </label>
+                <select
+                  id="fanout-scope"
+                  value={settings.fanout_scope ?? 'new_or_changed'}
+                  onChange={(e) => saveFanout({
+                    fanout_scope: e.target.value as 'new' | 'changed' | 'new_or_changed' | 'all_alive',
+                  })}
+                  className="bg-white border border-dark-700 rounded-lg px-3 py-1.5 text-sm text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150"
+                >
+                  <option value="new">{t('settings.fanoutScopeNew')}</option>
+                  <option value="changed">{t('settings.fanoutScopeChanged')}</option>
+                  <option value="new_or_changed">{t('settings.fanoutScopeNewOrChanged')}</option>
+                  <option value="all_alive">{t('settings.fanoutScopeAllAlive')}</option>
+                </select>
+                <span className="text-xs text-dark-500">{t('settings.fanoutScopeHint')}</span>
               </div>
             </div>
           </SectionCard>
