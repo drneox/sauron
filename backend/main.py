@@ -5,6 +5,7 @@ ASM (Attack Surface Management) - FastAPI Backend
 Main application entry point
 """
 import asyncio
+import httpx
 import csv
 import hashlib
 import io
@@ -346,7 +347,7 @@ CATEGORY_SCORE_WEIGHT = {"vulnerability": 1.0, "misconfiguration": 0.6, "exposur
 # ones stay in existing_private), so cloud_storage → vulnerability.
 MODULE_FINDING_CATEGORY: dict[str, str] = {
     # Neutral inventory — never penalizes
-    "whois": "info",
+    "whois": "info",             # refined per-finding: domain expiration warning is misconfiguration
     "dns": "info",               # refined per-finding: AXFR allowed is a real misconfiguration
     "subdomains": "info",        # enumeration results, incl. sensitive-looking names
     "tech": "info",              # fingerprinting; cookie flags are also reported by cookies
@@ -376,7 +377,7 @@ MODULE_FINDING_CATEGORY: dict[str, str] = {
     "blacklist": "vulnerability",
     "frontend_cve": "vulnerability",
     "nuclei": "vulnerability",
-    "wayback": "vulnerability",
+    "wayback": "vulnerability",  # refined per-finding: merely-archived sensitive URLs are exposure
     "cloud_storage": "vulnerability",  # only public buckets reach findings
     "agent": "vulnerability",          # agent-confirmed issues
 }
@@ -428,6 +429,19 @@ def _subdomain_eval_finding_category(finding) -> str:
     return "misconfiguration"    # forwarded headers/tech findings from the live host
 
 
+def _whois_finding_category(finding) -> str:
+    # Domain expiration is a real operational/hijack risk (an expired domain
+    # can be re-registered by an attacker), not neutral registration inventory.
+    return "misconfiguration" if "expires in" in str(finding).lower() else "info"
+
+
+def _wayback_finding_category(finding) -> str:
+    s = str(finding)
+    if "in archived snapshot of" in s:
+        return "vulnerability"   # a secret pattern was actually matched in archived content
+    return "exposure"            # a sensitive-looking URL merely appeared in the archive — unconfirmed
+
+
 def _breach_finding_category(finding) -> str:
     s = str(finding).lower()
     if "skipped" in s or "not configured" in s:
@@ -440,6 +454,7 @@ def _breach_finding_category(finding) -> str:
 
 
 FINDING_CATEGORY_RULES = {
+    "whois": _whois_finding_category,
     "dns": _dns_finding_category,
     "smart_fuzz": _smart_fuzz_finding_category,
     "secret_verification": _secret_verification_finding_category,
@@ -447,6 +462,7 @@ FINDING_CATEGORY_RULES = {
     "mobile_apps": _mobile_apps_finding_category,
     "subdomain_eval": _subdomain_eval_finding_category,
     "breach": _breach_finding_category,
+    "wayback": _wayback_finding_category,
 }
 
 # Unknown modules default to info: an unrecognized module must never tank the
@@ -617,7 +633,8 @@ SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hou
                  "tools_subfinder", "tools_httpx", "tools_katana",
                  "tools_naabu", "tools_trufflehog",
                  "discovery_enabled", "vuln_scan_enabled",
-                 "default_discover_interval_hours", "skip_discovery_default")
+                 "default_discover_interval_hours", "skip_discovery_default",
+                 "ai_domain_suggestions")
 DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_DISCOVER_INTERVAL_HOURS = 720  # 30 days
@@ -652,6 +669,7 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
     vuln_scan_enabled = stored.get("vuln_scan_enabled")
     discover_interval = stored.get("default_discover_interval_hours")
     skip_discovery_default = stored.get("skip_discovery_default")
+    ai_domain_suggestions = stored.get("ai_domain_suggestions")
     tools = {
         name: stored.get(f"tools_{name}") if isinstance(stored.get(f"tools_{name}"), bool) else True
         for name in tools_runner.TOOLS
@@ -672,6 +690,7 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "vuln_scan_enabled": vuln_scan_enabled if isinstance(vuln_scan_enabled, bool) else True,
         "default_discover_interval_hours": discover_interval if isinstance(discover_interval, int) and discover_interval >= 1 else DEFAULT_DISCOVER_INTERVAL_HOURS,
         "skip_discovery_default": skip_discovery_default if isinstance(skip_discovery_default, bool) else False,
+        "ai_domain_suggestions": ai_domain_suggestions if isinstance(ai_domain_suggestions, bool) else False,
         **{f"tools_{name}": flag for name, flag in tools.items()},
     }
 
@@ -1071,6 +1090,15 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
     except Exception:
         # Keep the completed scan in memory so it stays reachable until restart
         logger.exception(f"[{scan_id}] Persistence failed — keeping result in memory only")
+    # AI domain suggestions (post-completion, best-effort): neighbors and
+    # brand-attributed domains from reverse_ip judged by the LLM; high
+    # confidence ones are registered as company domains with origin="ai".
+    try:
+        kind = (result or {}).get("kind", "full")
+        if kind in ("full", "discover"):
+            await _ai_domain_suggestions(dom, result, settings)
+    except Exception:
+        logger.exception(f"[{scan_id}] AI domain suggestions failed (non-fatal)")
 
 
 async def _get_or_create_company(name: str) -> Company:
@@ -1514,7 +1542,21 @@ async def _upsert_assets_incremental(dom: Domain, results_so_far: dict, scan_id:
     await _upsert_assets(dom, partial_result, scan_id)
 
 
+def _sanitize_json(obj: Any) -> Any:
+    """Postgres JSONB rejects NUL bytes and lone UTF-16 surrogates (asyncpg
+    raises 'unsupported Unicode escape sequence'). Strip them recursively so a
+    weird byte in a scanned page never kills persistence of the whole scan."""
+    if isinstance(obj, str):
+        return obj.replace("\x00", "").encode("utf-8", "ignore").decode("utf-8")
+    if isinstance(obj, dict):
+        return {_sanitize_json(k): _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 async def _persist_completed_scan(scan_id: str, domain: str, domain_id: int | None, result: dict) -> None:
+    result = _sanitize_json(result)
     dom = await Domain.get_or_none(id=domain_id) if domain_id is not None else None
     if dom is None:
         dom = await _get_or_create_domain(None, domain)
@@ -2326,6 +2368,32 @@ async def _run_discovery(discovery_id: str, company_name: str) -> None:
         DISCOVERIES[discovery_id].update({"status": "error", "error": str(e)})
 
 
+async def _register_domain_with_schedule(company_id: int, domain: str, origin: str, settings: dict) -> Domain | None:
+    """Create a company domain with the default vuln/discovery schedules.
+    Returns the domain row, or None if it already exists / is invalid."""
+    if not domain or not DOMAIN_RE.match(domain):
+        return None
+    if await Domain.get_or_none(company_id=company_id, domain=domain) is not None:
+        return None
+    dom = await Domain.create(company_id=company_id, domain=domain, origin=origin)
+    interval = settings["default_interval_hours"]
+    discover_on = settings["discovery_enabled"]
+    discover_interval = settings["default_discover_interval_hours"]
+    await Schedule.create(
+        domain_id=dom.id,
+        interval_hours=interval,
+        enabled=True,
+        agent_mode=settings["agent_mode_default"],
+        next_run_at=datetime.now(timezone.utc) + timedelta(hours=interval),
+        discover_enabled=discover_on,
+        discover_interval_hours=discover_interval if discover_on else None,
+        next_discover_at=datetime.now(timezone.utc) + timedelta(hours=discover_interval) if discover_on else None,
+    )
+    logger.info(f"Registered domain {domain} (origin={origin}) for company {company_id} "
+                f"with default schedule every {interval}h")
+    return dom
+
+
 async def _auto_register_discovered_domains(company_name: str, candidates: list[dict]) -> None:
     """Post-discovery hook for auto_discover_domains: when a company was just
     created (name match, <5 min old) register its high-confidence candidates as
@@ -2339,32 +2407,94 @@ async def _auto_register_discovered_domains(company_name: str, candidates: list[
         company = await Company.get_or_none(name=company_name, created_at__gte=cutoff)
         if company is None:
             return
-        interval = settings["default_interval_hours"]
         for cand in candidates or []:
             if not isinstance(cand, dict) or cand.get("confidence") != "high":
                 continue
             domain = (cand.get("domain") or "").strip().lower()
-            if not domain or not DOMAIN_RE.match(domain):
-                continue
-            if await Domain.get_or_none(company_id=company.id, domain=domain) is not None:
-                continue
-            dom = await Domain.create(company_id=company.id, domain=domain)
-            discover_on = settings["discovery_enabled"]
-            discover_interval = settings["default_discover_interval_hours"]
-            await Schedule.create(
-                domain_id=dom.id,
-                interval_hours=interval,
-                enabled=True,
-                agent_mode=settings["agent_mode_default"],
-                next_run_at=datetime.now(timezone.utc) + timedelta(hours=interval),
-                discover_enabled=discover_on,
-                discover_interval_hours=discover_interval if discover_on else None,
-                next_discover_at=datetime.now(timezone.utc) + timedelta(hours=discover_interval) if discover_on else None,
-            )
-            logger.info(f"Auto-registered discovered domain {domain} for company "
-                        f"{company.id} ({company.name}) with default schedule every {interval}h")
+            await _register_domain_with_schedule(company.id, domain, "ai", settings)
     except Exception:
         logger.exception(f"Auto-registration of discovered domains failed for '{company_name}'")
+
+
+_AI_DOMAIN_SUGGEST_SYSTEM = (
+    "Eres un analista de attack surface management. Dado el nombre de una empresa, su dominio "
+    "principal y una lista de dominios encontrados compartiendo su infraestructura (misma IP) o "
+    "con nombre similar, decide cuáles pertenecen legítimamente a la empresa. Responde SOLO con "
+    'JSON: {"suggestions": [{"domain": "...", "confidence": "high|medium|low", "reason": "..."}]}. '
+    "Marca confidence=high solo con evidencia fuerte (nombre de marca, razón social, o servicio "
+    "conocido de la empresa). CDN/hosting/parking/terceros = low. Si ninguno aplica, devuelve "
+    '{"suggestions": []}.'
+)
+
+
+async def _ai_domain_suggestions(dom: Domain, result: dict, settings: dict) -> None:
+    """Post-scan hook (setting ai_domain_suggestions): the LLM judges reverse-IP
+    neighbors / brand-attributed domains; high-confidence ones are registered as
+    company domains (origin="ai", default schedule). Best-effort, capped, and the
+    LLM may only pick from the candidate list — never invent domains."""
+    if not settings.get("ai_domain_suggestions") or dom.company_id is None:
+        return
+    api_key = os.getenv("AI_API_KEY", "").strip()
+    if not api_key:
+        return
+    reverse = ((result or {}).get("modules") or {}).get("reverse_ip") or {}
+    apex = dom.domain
+    raw: list[str] = []
+    for a in reverse.get("attributed") or []:
+        if isinstance(a, dict) and a.get("kind") == "brand" and a.get("domain"):
+            raw.append(a["domain"])
+    for n in reverse.get("neighbors") or []:
+        if isinstance(n, dict) and n.get("domain"):
+            raw.append(n["domain"])
+    existing = {d.domain for d in await Domain.filter(company_id=dom.company_id)}
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for c in raw:
+        c = c.strip().lower()
+        if not c or c in seen or c in existing or c == apex or c.endswith("." + apex):
+            continue
+        if not DOMAIN_RE.match(c):
+            continue
+        seen.add(c)
+        candidates.append(c)
+    if not candidates:
+        return
+    candidates = candidates[:25]
+    company = await Company.get_or_none(id=dom.company_id)
+    base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    model = os.getenv("AI_MODEL", "gpt-4o-mini")
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _AI_DOMAIN_SUGGEST_SYSTEM},
+            {"role": "user", "content": json.dumps({
+                "empresa": company.name if company else "",
+                "dominio_principal": apex,
+                "candidatos": candidates,
+            }, ensure_ascii=False)},
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"},
+    }
+
+    def _call() -> dict:
+        with httpx.Client(timeout=ai_summary.TIMEOUT) as client:
+            data = ai_summary._chat_request(client, base_url, api_key, payload)
+        return json.loads(data["choices"][0]["message"]["content"])
+
+    parsed = await asyncio.to_thread(_call)
+    added = 0
+    for s in parsed.get("suggestions", []):
+        if not isinstance(s, dict) or s.get("confidence") != "high":
+            continue
+        dname = str(s.get("domain") or "").strip().lower()
+        if dname not in seen or added >= 10:
+            continue
+        if await _register_domain_with_schedule(dom.company_id, dname, "ai", settings):
+            added += 1
+    if added:
+        logger.info(f"AI domain suggestions: +{added} domain(s) for company "
+                    f"{dom.company_id} from scan of {apex}")
 
 
 @app.post("/api/discover")
@@ -2449,6 +2579,7 @@ async def list_companies():
                 "domain": d.domain,
                 "created_at": d.created_at,
                 "app_developers": d.app_developers or [],
+                "origin": d.origin or "manual",
                 "last_grade": (latest.scorecard or {}).get("grade") if latest else None,
                 "last_scan_at": latest.completed_at if latest else None,
                 "schedule": {
@@ -2550,16 +2681,26 @@ async def _build_company_findings(company: Company) -> dict:
             "findings": result.get("findings") or [],
         })
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    # Category totals mirror the scoring model's classification (see
+    # MODULE_FINDING_CATEGORY / _finding_category) — vulnerability/
+    # misconfiguration/exposure are the categories that actually affect the
+    # score; `info` (neutral inventory) is intentionally excluded here since
+    # it never penalizes and would just be chart noise.
+    category_counts = {"vulnerability": 0, "misconfiguration": 0, "exposure": 0}
     for d in out_domains:
         for f in d["findings"]:
             r = f.get("risk", "low")
             if r in counts:
                 counts[r] += 1
+            cat = f.get("category")
+            if cat in category_counts:
+                category_counts[cat] += 1
     return {
         "company_id": company.id,
         "company_name": company.name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "totals": counts,
+        "category_totals": category_counts,
         "domains": out_domains,
     }
 
@@ -2773,12 +2914,14 @@ async def company_report_pdf(company_id: int):
     try:
         assets_payload = await _build_company_assets(company)
         assets_summary = assets_payload.get("summary")
+        assets_detail = assets_payload.get("assets")
     except Exception as e:
         logger.warning(f"Company PDF: asset inventory unavailable for company {company_id}: {e}")
         assets_summary = None
+        assets_detail = None
     try:
         pdf_bytes = pdf_report.generate_company_pdf(
-            company.name, findings_payload["domains"], assets_summary,
+            company.name, findings_payload["domains"], assets_summary, assets_detail,
         )
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", company.name).strip("_") or "company"
         return Response(
@@ -3659,6 +3802,7 @@ class SettingsUpdateRequest(BaseModel):
     chain_eval_max_targets: int | None = None
     chain_eval_fuzz: bool | None = None
     chain_eval_scope: str | None = None
+    ai_domain_suggestions: bool | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
     tools_katana: bool | None = None
@@ -3735,6 +3879,7 @@ async def update_settings(request: SettingsUpdateRequest):
         "chain_eval_max_targets": request.chain_eval_max_targets,
         "chain_eval_fuzz": request.chain_eval_fuzz,
         "chain_eval_scope": request.chain_eval_scope,
+        "ai_domain_suggestions": request.ai_domain_suggestions,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,
         "tools_katana": request.tools_katana,

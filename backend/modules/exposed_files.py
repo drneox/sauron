@@ -354,6 +354,9 @@ async def _get_baseline(client: httpx.AsyncClient, base_url: str) -> dict:
     Send 5 requests to random non-existent paths and record:
     - Which status codes the server returns for missing paths
     - Body hashes and sizes of those responses
+    - Where a redirect wall bounces missing paths to (e.g. every unknown
+      path -> /login), so a real prober can tell "exists but gated" apart
+      from "doesn't exist, just redirected like everything else"
     Also fetches the homepage (/) to detect catch-all SPA servers.
     Returns a fingerprint dict used later to filter false positives.
     """
@@ -363,8 +366,10 @@ async def _get_baseline(client: httpx.AsyncClient, base_url: str) -> dict:
     full_hashes_200: set[str] = set()  # full-body MD5
     sizes_403: Counter  = Counter()
     sizes_200: list[int] = []
+    redirect_locations: Counter = Counter()
     returns_403 = False
     returns_200 = False
+    returns_redirect = False
     waf_on_baseline = False
     waf_blocked = False
 
@@ -394,6 +399,11 @@ async def _get_baseline(client: httpx.AsyncClient, base_url: str) -> dict:
                 full_hashes_200.add(_body_hash_full(resp.content))
                 sizes_200.append(len(resp.content))
                 returns_200 = True
+            elif resp.status_code in (301, 302, 303, 307, 308):
+                loc = resp.headers.get("location", "").rstrip("/")
+                if loc:
+                    redirect_locations[loc] += 1
+                    returns_redirect = True
         except Exception:
             pass
 
@@ -420,6 +430,15 @@ async def _get_baseline(client: httpx.AsyncClient, base_url: str) -> dict:
             wall_size = size
             break
 
+    # Identify a "redirect wall": a redirect target that random non-existent
+    # paths hit ≥2 times — e.g. everything unauthenticated bounces to /login.
+    # Any probe that redirects to this same target is noise, not a hit.
+    redirect_wall_target: str | None = None
+    for loc, count in redirect_locations.items():
+        if count >= 2:
+            redirect_wall_target = loc
+            break
+
     # Median 200 size (for soft-404 size comparison)
     median_200: int | None = None
     if sizes_200:
@@ -434,6 +453,8 @@ async def _get_baseline(client: httpx.AsyncClient, base_url: str) -> dict:
         "median_200":       median_200,
         "returns_403":      returns_403,
         "returns_200":      returns_200,
+        "returns_redirect": returns_redirect,
+        "redirect_wall_target": redirect_wall_target,
         "waf_on_baseline":  waf_on_baseline,
         "waf_blocked":      waf_blocked,
         "homepage_hash":    homepage_hash,

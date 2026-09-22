@@ -51,6 +51,9 @@ class Domain(Model):
     # Apps rejected in the review workflow — never re-added by future scans:
     # [{"store": "google_play", "name": "Instagram"}]
     app_rejections = fields.JSONField(null=True)
+    # How this domain entered the inventory: "manual" (user added it) or "ai"
+    # (AI-suggested: high-confidence domain discovery / neighbor attribution).
+    origin = fields.CharField(max_length=16, default="manual")
     created_at = fields.DatetimeField(auto_now_add=True)
 
     scans: fields.ReverseRelation["Scan"]
