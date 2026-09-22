@@ -884,9 +884,9 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
             continue
         SCANS[scan_id]["current_module"] = name
         SCANS[scan_id]["progress"] = progress
+        start = time.time()
         try:
             logger.info(f"[{scan_id}] Running module: {name}")
-            start = time.time()
             results[name] = func(domain)
             if name == "js_secrets":
                 handoff["raw"] = results[name].pop("_raw", None)
@@ -895,6 +895,15 @@ def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: dict | N
         except Exception as e:
             logger.error(f"[{scan_id}] Module {name} crashed: {e}")
             results[name] = {"status": "error", "error": str(e)}
+        # Live feed for the progress UI: one entry per finished module.
+        mod_res = results.get(name) or {}
+        SCANS[scan_id].setdefault("modules_done", []).append({
+            "name": name,
+            "status": mod_res.get("status", "ok"),
+            "findings": len(mod_res.get("findings") or []),
+            "risk": mod_res.get("risk", "low"),
+            "duration": round(time.time() - start, 2),
+        })
         if on_module_done is not None and name in ASSET_PRODUCING_MODULES:
             try:
                 on_module_done(name, dict(results))
@@ -2207,6 +2216,8 @@ async def get_scan(scan_id: str, req: Request):
                 payload["started_at"] = scan["started_at"]
             if scan.get("planned_modules") is not None:
                 payload["planned_modules"] = scan["planned_modules"]
+            if scan.get("modules_done") is not None:
+                payload["modules_done"] = scan["modules_done"]
             if scan.get("agent_steps") is not None:
                 payload["agent_steps"] = scan["agent_steps"]
             return payload

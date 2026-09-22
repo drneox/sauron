@@ -32,6 +32,7 @@ import {
   ShieldAlert,
   Skull,
   Smartphone,
+  X,
   Zap,
 } from 'lucide-react'
 
@@ -113,9 +114,35 @@ const MODULE_ORDER = [
   'agent',
 ]
 
+// Phase grouping for the stepper (order matters)
+const PHASES: { key: string; modules: string[] }[] = [
+  { key: 'recon',   modules: ['whois', 'dns', 'dnssec', 'subdomains', 'subdomain_eval', 'reverse_ip'] },
+  { key: 'web',     modules: ['ssl', 'tls', 'headers', 'cors', 'cookies', 'tech', 'mobile_apps', 'waf', 'robots', 'frontend_cve'] },
+  { key: 'secrets', modules: ['admin', 'js_secrets', 'secret_verification', 'smart_fuzz', 'exposed', 'wayback'] },
+  { key: 'leaks',   modules: ['email', 'breach', 'blacklist'] },
+  { key: 'cloud',   modules: ['cloud_storage', 'api_exposure'] },
+  { key: 'vulns',   modules: ['ports', 'nuclei'] },
+  { key: 'ai',      modules: ['agent'] },
+]
+
+interface ModuleDone {
+  name: string
+  status: string
+  findings: number
+  risk: string
+  duration: number
+}
+
 interface Props {
   scanId: string
   onComplete: (report: ScanReport) => void
+}
+
+const RISK_DOT: Record<string, string> = {
+  low: 'bg-dark-500',
+  medium: 'bg-amber-400',
+  high: 'bg-orange-500',
+  critical: 'bg-red-500',
 }
 
 export default function ScanProgress({ scanId, onComplete }: Props) {
@@ -128,9 +155,11 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
   const [agentSteps, setAgentSteps] = useState<AgentScanStep[]>([])
   const [agentPhaseSeen, setAgentPhaseSeen] = useState(false)
   const [plannedModules, setPlannedModules] = useState<string[] | null>(null)
+  const [modulesDone, setModulesDone] = useState<ModuleDone[]>([])
   const [elapsed, setElapsed] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startRef = useRef<number | null>(null)
+  const feedEndRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     const poll = async () => {
@@ -157,6 +186,7 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
           setDomain(data.domain ?? '')
           if (data.kind) setKind(data.kind)
           if (Array.isArray(data.planned_modules)) setPlannedModules(data.planned_modules)
+          if (Array.isArray(data.modules_done)) setModulesDone(data.modules_done)
           if (data.phase === 'agent' || data.current_module === 'agent') {
             setAgentPhaseSeen(true)
           }
@@ -171,6 +201,11 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current) }
   }, [scanId, onComplete])
 
+  // Auto-scroll the live feed
+  useEffect(() => {
+    feedEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [modulesDone.length, agentSteps.length])
+
   const fmtElapsed = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
   const agentPhase = currentModule === 'agent'
   // Only the modules this scan will actually run (backend-planned); fallback
@@ -179,13 +214,22 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
   const visibleModules = agentPhaseSeen || plannedModules
     ? baseModules
     : baseModules.filter((m) => m !== 'agent')
-  const currentIdx = currentModule ? visibleModules.indexOf(currentModule) : -1
-  const doneCount = progress === 100
-    ? visibleModules.length
-    : visibleModules.filter((_, idx) => idx < currentIdx).length
+  const doneNames = new Set(modulesDone.map((m) => m.name))
+  const doneCount = progress === 100 ? visibleModules.length : doneNames.size
+
+  // Phases filtered to the modules this scan will run
+  const visiblePhases = PHASES
+    .map((p) => ({ ...p, modules: p.modules.filter((m) => visibleModules.includes(m)) }))
+    .filter((p) => p.modules.length > 0)
+
+  const phaseState = (mods: string[]): 'done' | 'active' | 'pending' => {
+    if (currentModule && mods.includes(currentModule)) return 'active'
+    if (mods.every((m) => doneNames.has(m) || progress === 100)) return 'done'
+    return 'pending'
+  }
 
   return (
-    <div className="max-w-3xl mx-auto mt-8 space-y-6">
+    <div className="max-w-4xl mx-auto mt-8 space-y-6">
       {/* Header card */}
       <div className="card space-y-4">
         <div className="flex flex-wrap items-center gap-2">
@@ -234,73 +278,142 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
             />
           </div>
           <p className="text-[11px] text-dark-600 font-mono">
-            {t('scan.modulesDone', { done: doneCount, total: visibleModules.length })}
+            {plannedModules || status !== 'queued'
+              ? t('scan.modulesDone', { done: doneCount, total: visibleModules.length })
+              : ''}
           </p>
         </div>
       </div>
 
-      {/* Modules — compact grid of only what will actually run */}
-      <div className="card">
-        <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-wider mb-3">{t('scan.modules')}</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-          {visibleModules.map((mod, idx) => {
-            const done = idx < currentIdx || progress === 100
-            const active = mod === currentModule
-            const Icon = MODULE_ICONS[mod] ?? Globe
+      {(plannedModules || status !== 'queued') && (
+      <div className="grid grid-cols-1 md:grid-cols-[220px,1fr] gap-4 items-start">
+        {/* Phase stepper */}
+        <div className="card !p-3 space-y-1 md:sticky md:top-20">
+          {visiblePhases.map((p) => {
+            const state = phaseState(p.modules)
+            const doneInPhase = p.modules.filter((m) => doneNames.has(m)).length
             return (
-              <div key={mod} className={clsx(
-                'flex items-center gap-2.5 px-3 py-1.5 rounded-lg transition-all duration-150 border text-sm',
-                active
-                  ? 'bg-cyber-50 border-cyber-200'
-                  : done
-                    ? 'bg-emerald-50/60 border-emerald-100'
-                    : 'border-transparent',
+              <div key={p.key} className={clsx(
+                'px-3 py-2 rounded-lg border transition-all duration-150',
+                state === 'active' ? 'bg-cyber-50 border-cyber-200'
+                  : state === 'done' ? 'bg-emerald-50/50 border-emerald-100'
+                  : 'border-transparent',
               )}>
-                <span className={clsx(
-                  'shrink-0',
-                  active ? 'text-cyber-600' : done ? 'text-emerald-600' : 'text-dark-600',
-                )}>
-                  <Icon className="w-3.5 h-3.5" />
-                </span>
-                <span className={clsx(
-                  'flex-1 truncate',
-                  active ? 'text-cyber-700 font-medium' : done ? 'text-emerald-700' : 'text-dark-500',
-                )}>
-                  {MODULE_LABELS[mod]}
-                </span>
-                {done && <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" strokeWidth={2.5} />}
-                {active && (
-                  <span className="flex gap-1 shrink-0">
-                    {[0, 1, 2].map(i => (
-                      <span key={i} className="w-1 h-1 bg-cyber-500 rounded-full animate-bounce"
-                        style={{ animationDelay: `${i * 0.15}s` }} />
-                    ))}
+                <div className="flex items-center gap-2">
+                  <span className={clsx(
+                    'w-4 h-4 flex items-center justify-center shrink-0',
+                    state === 'done' ? 'text-emerald-600' : state === 'active' ? 'text-cyber-600' : 'text-dark-600',
+                  )}>
+                    {state === 'done'
+                      ? <Check className="w-3.5 h-3.5" strokeWidth={2.5} />
+                      : state === 'active'
+                        ? <span className="w-2 h-2 bg-cyber-500 rounded-full animate-ping" />
+                        : <span className="w-1.5 h-1.5 rounded-full bg-dark-700" />}
                   </span>
+                  <span className={clsx(
+                    'text-xs font-medium flex-1',
+                    state === 'done' ? 'text-emerald-700' : state === 'active' ? 'text-cyber-700' : 'text-dark-500',
+                  )}>
+                    {t(`scan.phases.${p.key}`)}
+                  </span>
+                  <span className="text-[10px] text-dark-600 font-mono">{doneInPhase}/{p.modules.length}</span>
+                </div>
+                {state === 'active' && (
+                  <div className="mt-1.5 ml-6 space-y-1">
+                    {p.modules.map((m) => {
+                      const Icon = MODULE_ICONS[m] ?? Globe
+                      const mDone = doneNames.has(m)
+                      const mActive = m === currentModule
+                      return (
+                        <div key={m} className={clsx(
+                          'flex items-center gap-1.5 text-[11px]',
+                          mActive ? 'text-cyber-700 font-medium' : mDone ? 'text-emerald-600' : 'text-dark-500',
+                        )}>
+                          <Icon className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{MODULE_LABELS[m]}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
               </div>
             )
           })}
         </div>
-      </div>
 
-      {agentPhaseSeen && (
-        <div className="space-y-3">
-          <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-wider inline-flex items-center gap-1.5">
-            <Bot className="w-3.5 h-3.5 text-purple-600" /> {t('scan.agentSteps')}
-          </h3>
-          {agentSteps.length === 0 && agentPhase && (
-            <p className="text-dark-500 text-sm text-center py-6 animate-pulse">
-              {t('scan.waitingFirst')}
+        {/* Live feed */}
+        <div className="card max-h-[520px] overflow-y-auto">
+          <h3 className="text-xs font-semibold text-dark-500 uppercase tracking-wider mb-3">{t('scan.liveFeed')}</h3>
+          {modulesDone.length === 0 && !agentPhase && (
+            <p className="text-dark-500 text-sm text-center py-8 animate-pulse">
+              {status === 'queued' ? t('scan.queued') : t('scan.waitingFirst')}
             </p>
           )}
-          {agentSteps.map((s) => <AgentStepCard key={s.n} step={s} />)}
-          {agentPhase && agentSteps.length > 0 && (
-            <div className="flex items-center gap-2 text-purple-600 text-sm animate-pulse pl-2">
-              <span className="w-2 h-2 bg-purple-500 rounded-full" />
-              {t('scan.agentThinking')}
+          <div className="space-y-1">
+            {modulesDone.map((m, i) => {
+              const Icon = MODULE_ICONS[m.name] ?? Globe
+              return (
+                <div key={`${m.name}-${i}`} className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg hover:bg-dark-900/50 text-sm">
+                  <Icon className="w-3.5 h-3.5 text-dark-500 shrink-0" />
+                  <span className="text-dark-200 text-xs flex-1 truncate">{MODULE_LABELS[m.name] ?? m.name}</span>
+                  {m.status === 'error' ? (
+                    <span className="inline-flex items-center gap-1 text-[10px] text-red-600 font-medium">
+                      <X className="w-3 h-3" /> {t('scan.moduleError')}
+                    </span>
+                  ) : m.status === 'skipped' ? (
+                    <span className="text-[10px] text-dark-600">{t('scan.moduleSkipped')}</span>
+                  ) : (
+                    <span className={clsx(
+                      'text-[10px] font-mono',
+                      m.findings > 0 ? 'text-amber-600 font-semibold' : 'text-dark-600',
+                    )}>
+                      {t('scan.findingsCount', { count: m.findings })}
+                    </span>
+                  )}
+                  <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', RISK_DOT[m.risk] ?? RISK_DOT.low)}
+                    title={`risk: ${m.risk}`} />
+                  <span className="text-[10px] text-dark-600 font-mono tabular-nums shrink-0">{m.duration}s</span>
+                </div>
+              )
+            })}
+            {currentModule && currentModule !== 'agent' && (
+              <div className="flex items-center gap-2.5 px-2.5 py-1.5 text-sm">
+                <span className="flex gap-1 shrink-0 w-3.5 justify-center">
+                  {[0, 1, 2].map(i => (
+                    <span key={i} className="w-1 h-1 bg-cyber-500 rounded-full animate-bounce"
+                      style={{ animationDelay: `${i * 0.15}s` }} />
+                  ))}
+                </span>
+                <span className="text-cyber-700 text-xs font-medium truncate">
+                  {MODULE_LABELS[currentModule] ?? currentModule}
+                </span>
+              </div>
+            )}
+            <div ref={feedEndRef} />
+          </div>
+
+          {/* Agent steps live inside the feed column */}
+          {agentPhaseSeen && (
+            <div className="mt-4 pt-4 border-t border-dark-800 space-y-3">
+              <h4 className="text-xs font-semibold text-dark-500 uppercase tracking-wider inline-flex items-center gap-1.5">
+                <Bot className="w-3.5 h-3.5 text-purple-600" /> {t('scan.agentSteps')}
+              </h4>
+              {agentSteps.length === 0 && agentPhase && (
+                <p className="text-dark-500 text-sm text-center py-6 animate-pulse">
+                  {t('scan.waitingFirst')}
+                </p>
+              )}
+              {agentSteps.map((s) => <AgentStepCard key={s.n} step={s} />)}
+              {agentPhase && agentSteps.length > 0 && (
+                <div className="flex items-center gap-2 text-purple-600 text-sm animate-pulse pl-2">
+                  <span className="w-2 h-2 bg-purple-500 rounded-full" />
+                  {t('scan.agentThinking')}
+                </div>
+              )}
             </div>
           )}
         </div>
+      </div>
       )}
     </div>
   )
