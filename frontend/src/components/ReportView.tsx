@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ScanReport } from '../types/report'
+import { getToken } from '../auth'
 import { RiskBadge } from './ui'
 import { Download, Plus } from 'lucide-react'
 import ScoreCard from './sections/ScoreCard'
@@ -49,7 +50,9 @@ export default function ReportView({ report, onNewScan }: Props) {
   const handleDownloadPdf = async () => {
     setDownloading(true)
     try {
-      const res = await fetch(`/api/scan/${report.scan_id}/report.pdf`)
+      const res = await fetch(`/api/scan/${report.scan_id}/report.pdf`, {
+        headers: { Authorization: `Bearer ${getToken() ?? ''}` },
+      })
       if (!res.ok) {
         let detail = `HTTP ${res.status}`
         try { const j = await res.json(); detail = j.detail || detail } catch {}
