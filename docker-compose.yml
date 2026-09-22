@@ -1,0 +1,48 @@
+# Argus ASM — full stack: Postgres + FastAPI backend + nginx frontend
+services:
+  db:
+    image: postgres:16
+    container_name: asm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see backend/.env.example)}
+      POSTGRES_DB: asm
+    ports:
+      # Localhost-only: the DB is reachable from the host for dev tooling
+      # (psql, local .venv) but never from the LAN/Internet.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - asm_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d asm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: sauron-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      # Dentro de compose la DB se alcanza por nombre de servicio
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see backend/.env.example)}@db:5432/asm
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: sauron-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  asm_pgdata:
