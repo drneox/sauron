@@ -629,19 +629,24 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
     }
   }
 
-  // Per-module rescan: only offered when exactly one domain is in scope —
-  // a module scan targets a single domain, so with several in scope the
-  // button is disabled (tooltip explains why).
+  // Per-module rescan: one module scan per domain in scope (the queue
+  // serializes them). Single domain → straight to the progress page;
+  // several → confirm, enqueue each, land on History.
   const [rescanning, setRescanning] = useState(false)
   const scopeDomains = filteredCompanies.flatMap((c) => c.domains)
-  const rescanDomain = scopeDomains.length === 1 ? scopeDomains[0].domain : null
 
   const rescanModule = async (module: string) => {
-    if (!rescanDomain || rescanning) return
+    const targets = scopeDomains.map((d) => d.domain)
+    if (!targets.length || rescanning) return
+    if (targets.length > 1 && !window.confirm(t('dashboard.rescanModuleConfirmMulti', { count: targets.length }))) return
     setRescanning(true)
     try {
-      const { data } = await axios.post('/api/scan', { domain: rescanDomain, modules: [module] })
-      navigate(`/scanning/${data.scan_id}`)
+      let firstId: string | null = null
+      for (const domain of targets) {
+        const { data } = await axios.post('/api/scan', { domain, modules: [module] })
+        firstId = firstId ?? data.scan_id
+      }
+      navigate(targets.length === 1 && firstId ? `/scanning/${firstId}` : '/history')
     } catch (err) {
       setError(errorMessage(err, t('dashboard.rescanModuleError')))
       setRescanning(false)
@@ -1056,10 +1061,10 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
                 {!readOnly && MODULE_RESCAN[category] && (
                   <button
                     onClick={() => rescanModule(MODULE_RESCAN[category]!)}
-                    disabled={!rescanDomain || rescanning}
-                    title={rescanDomain
-                      ? t('dashboard.rescanModuleTitle', { domain: rescanDomain })
-                      : t('dashboard.rescanModuleMulti')}
+                    disabled={!scopeDomains.length || rescanning}
+                    title={scopeDomains.length === 1
+                      ? t('dashboard.rescanModuleTitle', { domain: scopeDomains[0].domain })
+                      : t('dashboard.rescanModuleMulti', { count: scopeDomains.length })}
                     className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <RefreshCw className={clsx('w-3.5 h-3.5', rescanning && 'animate-spin')} />
