@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <defs>
+    <linearGradient id="sweep" x1="24" y1="24" x2="33" y2="15" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22d3ee" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="iris-clip">
+      <circle cx="24" cy="24" r="9.5"/>
+    </clipPath>
+  </defs>
+  <!-- angular hexagonal eye -->
+  <path d="M3 24 L14 12 L34 12 L45 24 L34 36 L14 36 Z" stroke="#22d3ee" stroke-opacity="0.9" stroke-width="2" stroke-linejoin="round"/>
+  <!-- corner nodes: the many eyes of Argus -->
+  <circle cx="3" cy="24" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <circle cx="14" cy="12" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <circle cx="34" cy="12" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <circle cx="45" cy="24" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <circle cx="34" cy="36" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <circle cx="14" cy="36" r="1.8" fill="#22d3ee" fill-opacity="0.8"/>
+  <!-- iris = radar rings -->
+  <circle cx="24" cy="24" r="9.5" stroke="#22d3ee" stroke-opacity="0.55" stroke-width="1.5"/>
+  <circle cx="24" cy="24" r="5.5" stroke="#22d3ee" stroke-opacity="0.3" stroke-width="1.2"/>
+  <!-- rotating sweep inside the iris -->
+  <g clip-path="url(#iris-clip)">
+    <g>
+      <animateTransform attributeName="transform" type="rotate" from="0 24 24" to="360 24 24" dur="3.5s" repeatCount="indefinite"/>
+      <path d="M24 24 L33 15.5 A9.5 9.5 0 0 0 24 14.5 Z" fill="url(#sweep)"/>
+      <line x1="24" y1="24" x2="33" y2="15.5" stroke="#22d3ee" stroke-width="1.2" stroke-linecap="round"/>
+    </g>
+  </g>
+  <!-- pupil -->
+  <circle cx="24" cy="24" r="2.6" fill="#22d3ee"/>
+</svg>

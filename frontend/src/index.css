@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-dark-950 text-dark-200 font-sans antialiased;
+  }
+
+  ::selection {
+    @apply bg-cyber-200 text-cyber-900;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-cyber-500/50 ring-offset-1 ring-offset-white;
+  }
+
+  ::-webkit-scrollbar {
+    @apply w-1.5;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-dark-900;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-dark-700 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-cyber-400;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white border border-dark-800 rounded-xl p-5 shadow-sm shadow-dark-800/40;
+  }
+
+  /* Chainguard-style accent on hover for interactive cards */
+  .card-hover {
+    @apply transition-all duration-150 hover:border-cyber-400 hover:shadow-md hover:shadow-cyber-900/5;
+  }
+
+  /* Subtle dot texture for hero / auth backdrops */
+  .bg-dots {
+    background-image: radial-gradient(circle, theme('colors.dark.800') 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .bg-dots-cyber {
+    background-image: radial-gradient(circle, theme('colors.cyber.200') 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  .badge-low {
+    @apply bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide;
+  }
+  .badge-medium {
+    @apply bg-amber-50 text-amber-700 border border-amber-200 text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide;
+  }
+  .badge-high {
+    @apply bg-orange-50 text-orange-700 border border-orange-200 text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide;
+  }
+  .badge-critical {
+    @apply bg-red-50 text-red-700 border border-red-200 text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide;
+  }
+  .badge-info {
+    @apply bg-blue-50 text-blue-700 border border-blue-200 text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide;
+  }
+
+  .btn-secondary {
+    @apply text-xs px-3 py-1.5 bg-white hover:bg-dark-900 border border-dark-700 rounded-lg text-dark-200 transition-colors duration-150 inline-flex items-center gap-1.5 disabled:opacity-50;
+  }
+
+  .chip {
+    @apply text-[11px] px-2 py-0.5 rounded-full font-semibold border inline-flex items-center gap-1;
+  }
+}
