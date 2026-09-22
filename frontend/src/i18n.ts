@@ -586,6 +586,15 @@ const en = {
       watchScan: 'Watch',
     },
   },
+  analytics: {
+    title: 'Analytics',
+    bySeverity: 'Findings by severity',
+    byCategory: 'Findings by category',
+    perCompany: 'Findings per company',
+    surfaceOverTime: 'Attack surface over time',
+    ratingTrend: 'Rating trend',
+    remediation: 'Remediation status',
+  },
   companyReport: {
     reportTitle: 'Report — {{name}}',
     latestPerDomain: 'Latest scan per domain',
@@ -1608,6 +1617,15 @@ const es: typeof en = {
       },
       watchScan: 'Ver progreso',
     },
+  },
+  analytics: {
+    title: 'Analítica',
+    bySeverity: 'Hallazgos por severidad',
+    byCategory: 'Hallazgos por categoría',
+    perCompany: 'Hallazgos por empresa',
+    surfaceOverTime: 'Superficie de ataque en el tiempo',
+    ratingTrend: 'Tendencia de rating',
+    remediation: 'Estado de remediación',
   },
   companyReport: {
     reportTitle: 'Informe — {{name}}',

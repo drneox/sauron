@@ -28,6 +28,7 @@ import {
 } from './assetTable'
 import { HostTable, HostFilter, TaggedHost } from './hostTable'
 import RatingTrendCard from './RatingTrend'
+import DashboardAnalytics from './DashboardAnalytics'
 import PortfolioSection from './PortfolioSection'
 import ComplianceSection from './ComplianceSection'
 import {
@@ -1088,6 +1089,9 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
               )
             })}
           </div>
+
+          {/* Analytics charts — same scope as the cards (global or filtered company) */}
+          <DashboardAnalytics companyId={selectedCompany?.id ?? null} />
 
           {totalAssets === 0 && visibleHosts.length === 0 && category !== 'companies' && category !== 'domains' ? (
             <div className="card text-center text-dark-500 py-12 text-sm">
