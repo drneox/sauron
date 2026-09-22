@@ -460,15 +460,17 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
               <LinkValueCell asset={a} href={a.url} extra={
                 <>
                   <VerdictBadge verdict={a.llm_verdict} />
-                  {a.suspicious && a.id != null && (
+                  {a.id != null && (
                     <>
-                      <button
-                        onClick={() => reviewApp(a, 'approve')}
-                        title={t('assets.approveAppTitle')}
-                        className="p-0.5 text-dark-500 hover:text-mint-600 hover:bg-mint-300/20 rounded transition-colors duration-150"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                      </button>
+                      {a.suspicious && (
+                        <button
+                          onClick={() => reviewApp(a, 'approve')}
+                          title={t('assets.approveAppTitle')}
+                          className="p-0.5 text-dark-500 hover:text-mint-600 hover:bg-mint-300/20 rounded transition-colors duration-150"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       <button
                         onClick={() => reviewApp(a, 'reject')}
                         title={t('assets.rejectAppTitle')}
