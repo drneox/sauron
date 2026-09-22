@@ -1400,8 +1400,20 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
             "description": exposed.get("description"),
         }
 
+    # Apps rejected in the review workflow never come back (rejection memory).
+    rejected_apps = {
+        (r.get("store"), r.get("name"))
+        for r in (dom.app_rejections or [])
+        if isinstance(r, dict)
+    }
     for app_entry in (apps_mod.get("apps") or []) + (apps_mod.get("suspicious") or []):
         if not isinstance(app_entry, dict) or not app_entry.get("name"):
+            continue
+        if (app_entry.get("store"), app_entry["name"]) in rejected_apps:
+            continue
+        # The LLM already judged this app unrelated to the brand — never
+        # persist it (not even as suspicious): it's review noise.
+        if app_entry.get("llm_verdict") == "unrelated":
             continue
         wanted[("app", app_entry["name"])] = {
             "store": app_entry.get("store"),
@@ -2919,11 +2931,35 @@ class AssetBulkReviewRequest(BaseModel):
     only_suspicious: bool = True
 
 
+async def _record_app_rejections(assets: list[Asset]) -> None:
+    """Remember rejected apps per domain so future scans never re-add them."""
+    by_domain: dict[int, list[dict]] = {}
+    for a in assets:
+        meta = a.metadata or {}
+        if a.type != "app" or not meta.get("store"):
+            continue
+        by_domain.setdefault(a.domain_id, []).append({"store": meta["store"], "name": a.value})
+    for domain_id, entries in by_domain.items():
+        dom = await Domain.get_or_none(id=domain_id)
+        if dom is None:
+            continue
+        current = dom.app_rejections or []
+        seen = {(r.get("store"), r.get("name")) for r in current if isinstance(r, dict)}
+        for e in entries:
+            if (e["store"], e["name"]) not in seen:
+                current.append(e)
+                seen.add((e["store"], e["name"]))
+        dom.app_rejections = current
+        await dom.save()
+
+
 @app.delete("/api/assets/{asset_id}", dependencies=[Depends(require_role("operator", "admin"))])
 async def delete_asset(asset_id: int):
     asset = await Asset.get_or_none(id=asset_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
+    if asset.type == "app":
+        await _record_app_rejections([asset])
     await asset.delete()
     return {"message": "Deleted"}
 
@@ -2939,6 +2975,7 @@ async def review_asset(asset_id: int, request: AssetReviewRequest):
     if asset is None:
         raise HTTPException(status_code=404, detail="Asset not found")
     if action == "reject":
+        await _record_app_rejections([asset])
         await asset.delete()
         return {"message": "Deleted"}
     meta = dict(asset.metadata or {})
@@ -2964,6 +3001,7 @@ async def review_assets_bulk(company_id: int, request: AssetBulkReviewRequest):
         candidates = [a for a in candidates if (a.metadata or {}).get("suspicious")]
     if action == "reject":
         ids = [a.id for a in candidates]
+        await _record_app_rejections(candidates)
         if ids:
             await Asset.filter(id__in=ids).delete()
         logger.info(f"Bulk review: rejected {len(ids)} '{request.type}' assets of company {company_id}")
