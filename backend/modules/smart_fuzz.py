@@ -321,8 +321,16 @@ async def _probe_path(
         # ── Redirects: record as informational (target may sit behind login) ──
         if code in (301, 302, 303, 307, 308):
             location = resp.headers.get("location", "")
-            # Catch-all redirects to the homepage/login are noise, not a hit.
-            if location.rstrip("/") in ("", "/", base_url.rstrip("/")):
+            norm_location = location.rstrip("/")
+            # Catch-all redirects to the homepage are noise, not a hit.
+            if norm_location in ("", "/", base_url.rstrip("/")):
+                return None
+            # Redirect wall: random non-existent paths in the baseline bounced
+            # to this same target (e.g. every unauthenticated path -> /login).
+            # A probe landing on the same target proves nothing about that
+            # specific path existing — it's the site's default behavior.
+            if baseline.get("redirect_wall_target") and norm_location == baseline["redirect_wall_target"]:
+                stats["wall_redirect"] += 1
                 return None
             if _base_severity(path) in ("critical", "high", "medium"):
                 return _make_hit(path, url, code, body_size, "low", directed,
@@ -382,7 +390,7 @@ async def _run_async(
 ) -> dict[str, Any]:
     base_url = f"https://{domain}"
     limits = httpx.Limits(max_connections=25, max_keepalive_connections=10)
-    stats = {"requests": 0, "errors": 0, "waf_pages": 0, "wall_403": 0}
+    stats = {"requests": 0, "errors": 0, "waf_pages": 0, "wall_403": 0, "wall_redirect": 0}
     async with make_async_client(
         timeout=httpx.Timeout(_PROBE_TIMEOUT),
         headers={"User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)"},
@@ -425,6 +433,15 @@ async def _run_async(
                     waf_blocked = True
                     logger.info(
                         f"[smart_fuzz] {domain}: 403 wall after {done} probes — cutting early"
+                    )
+                    break
+                # Redirect-wall early cut: everything unauthenticated bounces to
+                # the same target (e.g. a global login gate) — no point burning
+                # the rest of the budget on probes that can never resolve.
+                if done >= _WALL_CHECK_MIN_PROBES and stats["wall_redirect"] / done >= _WALL_SUPPRESS_RATIO:
+                    waf_blocked = True
+                    logger.info(
+                        f"[smart_fuzz] {domain}: redirect wall after {done} probes — cutting early"
                     )
                     break
 

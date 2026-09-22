@@ -155,7 +155,17 @@ function DomainRow({
   return (
     <div className="flex flex-wrap items-center gap-3 py-2 border-t border-dark-800 first:border-0">
       <div className="flex-1 min-w-[180px]">
-        <div className="text-sm text-dark-100 font-semibold break-all">{domain.domain}</div>
+        <div className="text-sm text-dark-100 font-semibold break-all">
+          {domain.domain}
+          {domain.origin === 'ai' && (
+            <span
+              className="ml-2 align-middle inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-purple-50 text-purple-700 border border-purple-200"
+              title={t('companies.aiOriginTitle')}
+            >
+              {t('companies.aiOrigin')}
+            </span>
+          )}
+        </div>
         <div className="text-dark-500 text-xs">
           {domain.last_scan_at
             ? t('companies.lastScan', { date: new Date(domain.last_scan_at).toLocaleString() })

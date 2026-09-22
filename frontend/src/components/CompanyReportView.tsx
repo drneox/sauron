@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
+import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   ArrowLeft,
   Cpu,
@@ -13,6 +14,7 @@ import {
   Radio,
   Route,
   ScanSearch,
+  ShieldAlert,
   Smartphone,
   Users,
   type LucideIcon,
@@ -25,6 +27,7 @@ interface FindingRow {
   module: string
   finding: string
   risk: 'low' | 'medium' | 'high' | 'critical'
+  category?: 'vulnerability' | 'misconfiguration' | 'exposure' | 'info'
 }
 
 interface DomainFindings {
@@ -37,12 +40,28 @@ interface DomainFindings {
   findings: FindingRow[]
 }
 
+interface CategoryTotals {
+  vulnerability: number
+  misconfiguration: number
+  exposure: number
+}
+
 interface CompanyFindingsResponse {
   company_id: number
   company_name: string
   generated_at: string
   totals: { critical: number; high: number; medium: number; low: number }
+  category_totals: CategoryTotals
   domains: DomainFindings[]
+}
+
+// Same categories the scoring model weighs (vulnerability 1.0 / misconfiguration
+// 0.6 / exposure 0.25) — `info` findings never affect the score and are
+// deliberately left out of this chart.
+const CATEGORY_COLORS: Record<keyof CategoryTotals, string> = {
+  vulnerability: '#e11d48',
+  misconfiguration: '#d97706',
+  exposure: '#0891b2',
 }
 
 interface Props {
@@ -87,6 +106,50 @@ const gradeChipBig = (g: string | null) =>
     g === 'F' && 'bg-red-50 text-red-700 border-red-200',
     !g && 'bg-dark-900 text-dark-500 border-dark-800',
   )
+
+function CategoryBreakdownCard({ totals }: { totals: CategoryTotals }) {
+  const { t } = useTranslation()
+  const chartData = (['vulnerability', 'misconfiguration', 'exposure'] as const).map((key) => ({
+    key,
+    label: t(`companyReport.category.${key}`),
+    value: totals[key],
+  }))
+  const total = chartData.reduce((sum, c) => sum + c.value, 0)
+
+  return (
+    <div className="card space-y-3">
+      <div className="flex items-center gap-2">
+        <ShieldAlert className="w-4 h-4 text-cyber-600" />
+        <h3 className="text-[15px] font-semibold tracking-tight text-dark-100 flex-1">
+          {t('companyReport.categoryBreakdown')}
+        </h3>
+        <span className="text-xs text-dark-500 font-mono">{total}</span>
+      </div>
+      <p className="text-xs text-dark-500">{t('companyReport.categoryBreakdownHint')}</p>
+      {total === 0 ? (
+        <p className="text-sm text-dark-500 text-center py-4">{t('companyReport.categoryNone')}</p>
+      ) : (
+        <div className="h-32">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 16, bottom: 0, left: 0 }}>
+              <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: '#6b7280' }} tickLine={false} axisLine={{ stroke: '#e6e9f0' }} />
+              <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 11, fill: '#1c2740' }} tickLine={false} axisLine={false} />
+              <Tooltip
+                cursor={{ fill: '#f8fafc' }}
+                contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #e6e9f0', borderRadius: 8, fontSize: 12 }}
+              />
+              <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={18} isAnimationActive={false}>
+                {chartData.map((c) => (
+                  <Cell key={c.key} fill={CATEGORY_COLORS[c.key]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  )
+}
 
 const ASSET_CARDS: { key: keyof AssetSummary; labelKey: string; icon: LucideIcon }[] = [
   { key: 'subdomains', labelKey: 'subdomains', icon: Globe },
@@ -225,6 +288,8 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
           <p className="text-xs">{t('companyReport.noScansHint')}</p>
         </div>
       )}
+
+      {data && scanned.length > 0 && <CategoryBreakdownCard totals={data.category_totals} />}
 
       {/* Per-domain cards */}
       {data?.domains.map((d) => {

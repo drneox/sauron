@@ -683,6 +683,7 @@ export interface CompanyDomain {
   last_scan_at: string | null
   schedule: Schedule | null
   app_developers?: AppDeveloperRef[]
+  origin?: 'manual' | 'ai'
 }
 
 export interface Company {
@@ -916,6 +917,7 @@ export interface AppSettings {
   chain_eval_max_targets?: number
   chain_eval_fuzz?: boolean
   chain_eval_scope?: 'new' | 'all'
+  ai_domain_suggestions?: boolean
   agent_mode_default?: boolean
   auto_discover_domains?: boolean
   vuln_scan_enabled?: boolean

@@ -195,6 +195,7 @@ export default function SettingsView() {
     chain_eval_max_targets?: number
     chain_eval_fuzz?: boolean
     chain_eval_scope?: 'new' | 'all'
+    ai_domain_suggestions?: boolean
   }) => {
     if (!settings) return
     const prev = settings
@@ -412,6 +413,16 @@ export default function SettingsView() {
                   <option value="all">{t('settings.chainScopeAll')}</option>
                 </select>
                 <span className="text-xs text-dark-500">{t('settings.chainScopeHint')}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Switch
+                  checked={settings.ai_domain_suggestions ?? false}
+                  onChange={(next) => saveChainEval({ ai_domain_suggestions: next })}
+                />
+                <div>
+                  <span className="text-sm text-dark-200">{t('settings.aiDomainSuggToggle')}</span>
+                  <p className="text-xs text-dark-500 leading-relaxed">{t('settings.aiDomainSuggDesc')}</p>
+                </div>
               </div>
             </div>
           </SectionCard>

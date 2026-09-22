@@ -1400,6 +1400,525 @@ def _build_secret_verification(data: dict, styles: dict) -> list:
     return elems
 
 
+def _build_cloud_storage(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("CLOUD STORAGE EXPOSURE", "☁")]
+    elems.append(_spacer(0.2))
+    rows = [
+        ("Candidates Checked",       str(data.get("candidates_checked", 0))),
+        ("Endpoints Probed",         str(data.get("endpoints_probed", 0))),
+        ("Exposed Buckets",          str(data.get("exposed_count", 0))),
+        ("Existing Private Buckets", str(data.get("existing_private", 0))),
+    ]
+    elems.append(_kv_table(rows))
+    exposed = data.get("exposed", [])
+    if exposed:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Exposed Buckets ({len(exposed)})", styles["h2"]))
+        hdr = [["Name", "Provider", "Status", "Severity", "URL"]]
+        for b in exposed:
+            sev = b.get("severity", "info")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            hdr.append([
+                Paragraph(_e(b.get("name", "")), styles["mono"]),
+                Paragraph(_e(b.get("provider", "")).upper(), styles["small"]),
+                Paragraph(_e(str(b.get("status", ""))), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+                Paragraph(_e(b.get("url", "")), styles["small_mono"]),
+            ])
+        t = Table(hdr, colWidths=[3.5 * cm, 2 * cm, 1.5 * cm, 2 * cm, COL_W - 9 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+    private_list = data.get("existing_private_list") or []
+    if private_list:
+        elems.append(_spacer(0.15))
+        names = ", ".join(_e(p.get("name", "")) for p in private_list[:20])
+        elems.append(Paragraph(f"Private buckets found (not publicly accessible): {names}", styles["small"]))
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_api_exposure(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("API EXPOSURE", "🔗")]
+    elems.append(_spacer(0.2))
+    rows = [
+        ("Paths Checked",         str(data.get("paths_checked", 0))),
+        ("Endpoints Found",       str(data.get("found_count", 0))),
+        ("Swagger/OpenAPI",       "⚠ Found" if data.get("swagger_found") else "Not found"),
+        ("GraphQL",               "⚠ Found" if data.get("graphql_found") else "Not found"),
+        ("GraphQL Introspection", "⚠ Enabled" if data.get("has_graphql_introspection") else "Disabled/N/A"),
+    ]
+    elems.append(_kv_table(rows))
+    found = data.get("found", [])
+    if found:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Discovered Endpoints ({len(found)})", styles["h2"]))
+        hdr = [["Path", "Label", "Status", "Severity"]]
+        for e in found:
+            sev = e.get("severity", "info")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            hdr.append([
+                Paragraph(_e(e.get("path", "")), styles["mono"]),
+                Paragraph(_e(e.get("label", "")), styles["small"]),
+                Paragraph(_e(str(e.get("status", ""))), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[6 * cm, 4 * cm, 2 * cm, COL_W - 12 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+    repos = data.get("github_repos") or []
+    if repos:
+        elems.append(_spacer(0.15))
+        elems.append(Paragraph("GitHub Repositories Found:", styles["body_bold"]))
+        for r in repos[:10]:
+            elems.append(Paragraph(f"• {_e(r.get('name',''))} — {_e(r.get('url',''))}", styles["finding"]))
+    postman = (data.get("postman_collections") or []) + (data.get("postman_workspaces") or [])
+    if postman:
+        elems.append(_spacer(0.15))
+        elems.append(Paragraph("Postman Collections/Workspaces Found:", styles["body_bold"]))
+        for p in postman[:10]:
+            elems.append(Paragraph(f"• {_e(p.get('name',''))} — {_e(p.get('url',''))}", styles["finding"]))
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_wayback(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("WAYBACK MACHINE — HISTORICAL EXPOSURE", "🕰")]
+    elems.append(_spacer(0.2))
+    rows = [
+        ("URLs Indexed",      str(data.get("urls_indexed", 0))),
+        ("Snapshots Fetched", str(data.get("snapshots_fetched", 0))),
+        ("Sensitive URLs",    str(data.get("sensitive_count", 0))),
+        ("Secrets Found",     str(data.get("secret_count", 0))),
+    ]
+    elems.append(_kv_table(rows))
+    sensitive = data.get("sensitive_urls", [])
+    if sensitive:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Sensitive Archived URLs ({len(sensitive)})", styles["h2"]))
+        hdr = [["URL", "Timestamp", "Label", "Severity"]]
+        for u in sensitive:
+            sev = u.get("severity", "info")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            hdr.append([
+                Paragraph(_e(u.get("url", "")), styles["small_mono"]),
+                Paragraph(_e(u.get("timestamp", "")), styles["small"]),
+                Paragraph(_e(u.get("label", "")), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[COL_W - 8.5 * cm, 2.5 * cm, 3 * cm, 2 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+    secrets = data.get("secrets_found", [])
+    if secrets:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Secrets Found in Archived Pages ({len(secrets)})", styles["h2"]))
+        hdr = [["Type", "Severity", "URL", "Snippet"]]
+        for s in secrets:
+            sev = s.get("severity", "low")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            hdr.append([
+                Paragraph(_e(s.get("secret_type", "")), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+                Paragraph(_e(s.get("url", "")), styles["small_mono"]),
+                Paragraph(_e(s.get("snippet", "")[:60]), styles["small_mono"]),
+            ])
+        t = Table(hdr, colWidths=[2.5 * cm, 1.8 * cm, 5 * cm, COL_W - 9.3 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_nuclei(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("NUCLEI VULNERABILITY SCAN", "🎯")]
+    elems.append(_spacer(0.2))
+    by_sev = data.get("by_severity", {})
+    rows = [("Total Findings", str(data.get("findings_count", 0)))]
+    for sev in ("critical", "high", "medium", "low", "info"):
+        if sev in by_sev:
+            rows.append((f"  {sev.capitalize()}", str(by_sev[sev])))
+    elems.append(_kv_table(rows))
+    detail = data.get("findings_detail", [])
+    if detail:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Template Matches ({len(detail)})", styles["h2"]))
+        hdr = [["Template", "Severity", "CVE(s)", "Matched At"]]
+        for n in detail:
+            sev = n.get("severity", "info")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            cves = ", ".join(n.get("cve_ids") or []) or "—"
+            hdr.append([
+                Paragraph(_e(n.get("name") or n.get("template_id", "")), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+                Paragraph(_e(cves), styles["small_mono"]),
+                Paragraph(_e(n.get("matched_at", "")), styles["small_mono"]),
+            ])
+        t = Table(hdr, colWidths=[5 * cm, 1.8 * cm, 3 * cm, COL_W - 9.8 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_mobile_apps(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("MOBILE APPS DISCOVERY", "📱")]
+    elems.append(_spacer(0.2))
+    apps = data.get("apps", [])
+    suspicious = data.get("suspicious", [])
+    rows = [
+        ("Brand",           data.get("brand") or "—"),
+        ("Confirmed Apps",  str(len(apps))),
+        ("Suspicious Apps", str(len(suspicious))),
+    ]
+    elems.append(_kv_table(rows))
+
+    if apps:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Confirmed Apps ({len(apps)})", styles["h2"]))
+        hdr = [["Name", "Store", "OS", "Version", "Developer", "Updated"]]
+        for a in apps:
+            hdr.append([
+                Paragraph(_e(a.get("name", "")), styles["small"]),
+                Paragraph(_e(a.get("store", "")), styles["small"]),
+                Paragraph(_e(a.get("os", "")), styles["small"]),
+                Paragraph(_e(a.get("version") or "—"), styles["small"]),
+                Paragraph(_e(a.get("developer") or "—"), styles["small"]),
+                Paragraph(_e(a.get("updated") or "—"), styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[4 * cm, 2.2 * cm, 1.5 * cm, 2 * cm, 4 * cm, COL_W - 13.7 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+
+    if suspicious:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Suspicious / Unverified Apps ({len(suspicious)})", styles["h2"]))
+        hdr = [["Name", "Store", "Developer", "LLM Verdict"]]
+        for a in suspicious:
+            verdict = a.get("llm_verdict") or "unknown"
+            v_col = {"suspicious": C_CRITICAL, "unrelated": C_TEXT_MUTED, "official": C_LOW}.get(verdict, C_TEXT_MUTED)
+            hdr.append([
+                Paragraph(_e(a.get("name", "")), styles["small"]),
+                Paragraph(_e(a.get("store", "")), styles["small"]),
+                Paragraph(_e(a.get("developer") or "—"), styles["small"]),
+                Paragraph(f'<font color="{v_col.hexval()}">{_e(verdict.upper())}</font>', styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[5 * cm, 2.5 * cm, 5 * cm, COL_W - 12.5 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_reverse_ip(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("REVERSE IP / SHARED HOSTING", "🧭")]
+    elems.append(_spacer(0.2))
+    ips_checked = data.get("ips_checked", [])
+    attributed  = data.get("attributed", [])
+    neighbors   = data.get("neighbors", [])
+    rows = [
+        ("IPs Checked",         str(len(ips_checked))),
+        ("Shared Hosting Risk", "⚠ YES" if data.get("shared_hosting_risk") else "No"),
+        ("Attributed Hosts",    str(len(attributed))),
+        ("Neighbor Domains",    str(len(neighbors))),
+    ]
+    elems.append(_kv_table(rows))
+
+    if ips_checked:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph("IP Lookups", styles["h2"]))
+        hdr = [["IP", "CDN", "Skipped", "Note"]]
+        for ip in ips_checked:
+            hdr.append([
+                Paragraph(_e(ip.get("ip", "")), styles["mono"]),
+                Paragraph(_e(ip.get("cdn") or "—"), styles["small"]),
+                Paragraph(_check(ip.get("skipped")), styles["small"]),
+                Paragraph(_e(ip.get("note") or "—"), styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[3.5 * cm, 3 * cm, 2 * cm, COL_W - 8.5 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+
+    if attributed:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Attributed Hosts ({len(attributed)})", styles["h2"]))
+        hdr = [["Domain", "IP", "Kind"]]
+        for a in attributed[:30]:
+            hdr.append([
+                Paragraph(_e(a.get("domain", "")), styles["mono"]),
+                Paragraph(_e(a.get("ip", "")), styles["small_mono"]),
+                Paragraph(_e(a.get("kind", "")), styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[COL_W - 8 * cm, 4 * cm, 4 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+        if len(attributed) > 30:
+            elems.append(_spacer(0.1))
+            elems.append(Paragraph(_e(f"+ {len(attributed) - 30} more."), styles["small"]))
+
+    if neighbors:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Neighbor Domains — Shared Hosting ({len(neighbors)})", styles["h2"]))
+        hdr = [["Domain", "IP"]]
+        for n in neighbors[:30]:
+            hdr.append([
+                Paragraph(_e(n.get("domain", "")), styles["mono"]),
+                Paragraph(_e(n.get("ip", "")), styles["small_mono"]),
+            ])
+        t = Table(hdr, colWidths=[COL_W - 5 * cm, 5 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+        if len(neighbors) > 30:
+            elems.append(_spacer(0.1))
+            elems.append(Paragraph(_e(f"+ {len(neighbors) - 30} more."), styles["small"]))
+
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_subdomain_eval(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("CHAINED SUBDOMAIN EVALUATION", "🧬")]
+    elems.append(_spacer(0.2))
+
+    if data.get("status") == "skipped":
+        elems.append(Paragraph(_e(data.get("reason") or "Skipped — no new subdomains to evaluate."), styles["body"]))
+        elems.append(_spacer(0.3))
+        return elems
+
+    evaluated = data.get("evaluated", [])
+    rows = [
+        ("Newly Evaluated", str(data.get("evaluated_count", 0))),
+        ("Alive",            str(data.get("alive_count", 0))),
+    ]
+    elems.append(_kv_table(rows))
+
+    if evaluated:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Evaluated Subdomains ({len(evaluated)})", styles["h2"]))
+        hdr = [["Subdomain", "Alive", "HTTP", "Risk", "Note"]]
+        for e in evaluated:
+            risk = e.get("risk", "low")
+            risk_col = RISK_COLOR.get(risk, C_INFO)
+            hdr.append([
+                Paragraph(_e(e.get("subdomain", "")), styles["mono"]),
+                Paragraph(_check(e.get("alive")), styles["small"]),
+                Paragraph(_e(e.get("http_status") if e.get("http_status") is not None else "—"), styles["small"]),
+                Paragraph(f'<font color="{risk_col.hexval()}">{risk.upper()}</font>', styles["small"]),
+                Paragraph(_e(e.get("note") or "—"), styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[5.5 * cm, 1.5 * cm, 1.5 * cm, 2 * cm, COL_W - 10.5 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+
+    sv = data.get("secret_verification")
+    if sv:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph("Secret Verification (from new subdomains)", styles["h2"]))
+        elems.append(_kv_table([
+            ("Keys Verified", str(len(sv.get("verified", [])))),
+            ("Valid Keys",    str(sv.get("valid_count", 0))),
+        ], col_w=(3.5 * cm, COL_W - 3.5 * cm)))
+        for v in sv.get("verified", []):
+            verdict = v.get("verdict", "unknown")
+            v_col = {"valid": C_CRITICAL, "invalid": C_LOW}.get(verdict, C_TEXT_MUTED)
+            elems.append(Paragraph(
+                f'• {_e(v.get("type",""))} on {_e(v.get("host",""))} — '
+                f'<font color="{v_col.hexval()}"><b>{_e(verdict.upper())}</b></font> — {_e(v.get("evidence",""))}',
+                styles["finding"],
+            ))
+
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
+def _build_smart_fuzz(data: dict, styles: dict) -> list:
+    if not data:
+        return []
+    elems: list = [_section_header("SMART PATH FUZZING", "🧵")]
+    elems.append(_spacer(0.2))
+    paths = data.get("paths_found", [])
+    rows = [
+        ("Wordlists Used", ", ".join(data.get("wordlist_used", [])) or "—"),
+        ("Requests Made",  str(data.get("requests_made", 0))),
+        ("Paths Found",    str(len(paths))),
+        ("WAF Blocked",    "⚠ YES" if data.get("waf_blocked") else "No"),
+    ]
+    if "directed_count" in data:
+        rows.append(("LLM-Directed Probes", str(data.get("directed_count", 0))))
+    elems.append(_kv_table(rows))
+
+    if paths:
+        elems.append(_spacer(0.2))
+        elems.append(Paragraph(f"Discovered Paths ({len(paths)})", styles["h2"]))
+        hdr = [["Path", "Status", "Severity", "Directed", "Evidence"]]
+        for p in paths:
+            sev = p.get("severity", "info")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            hdr.append([
+                Paragraph(_e(p.get("path", "")), styles["mono"]),
+                Paragraph(_e(str(p.get("status", ""))), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+                Paragraph(_check(p.get("directed")), styles["small"]),
+                Paragraph(_e((p.get("evidence") or "—")[:60]), styles["small_mono"]),
+            ])
+        t = Table(hdr, colWidths=[4.5 * cm, 1.5 * cm, 2 * cm, 1.8 * cm, COL_W - 9.8 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+
+    for f in data.get("findings", []):
+        elems.append(Paragraph(f"• {_e(f)}", styles["finding"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
 def _build_ai_summary(report: dict, styles: dict) -> list:
     ai = report.get("ai_summary") or {}
     if ai.get("status") != "ok":
@@ -1533,6 +2052,10 @@ def generate_pdf(report: dict) -> bytes:
     _safe_extend(story, "tech",       _build_tech,       mods.get("tech") or {}, styles)
     _safe_extend(story, "robots",     _build_robots,     mods.get("robots") or {}, styles)
 
+    # ── Digital Footprint ──
+    _safe_extend(story, "mobile_apps", _build_mobile_apps, mods.get("mobile_apps") or {}, styles)
+    _safe_extend(story, "reverse_ip",  _build_reverse_ip,  mods.get("reverse_ip") or {}, styles)
+
     # ── Attack Surface ──
     _safe_extend(story, "admin",        _build_admin,        mods.get("admin") or {}, styles)
     _safe_extend(story, "frontend_cve", _build_frontend_cve, mods.get("frontend_cve") or {}, styles)
@@ -1540,10 +2063,18 @@ def generate_pdf(report: dict) -> bytes:
     _safe_extend(story, "secret_verification", _build_secret_verification, mods.get("secret_verification") or {}, styles)
     _safe_extend(story, "exposed",    _build_exposed,    mods.get("exposed") or {}, styles)
     _safe_extend(story, "ports",      _build_ports,      mods.get("ports") or {}, styles)
+    _safe_extend(story, "cloud_storage",  _build_cloud_storage,  mods.get("cloud_storage") or {}, styles)
+    _safe_extend(story, "api_exposure",   _build_api_exposure,   mods.get("api_exposure") or {}, styles)
+    _safe_extend(story, "smart_fuzz",     _build_smart_fuzz,     mods.get("smart_fuzz") or {}, styles)
+    _safe_extend(story, "subdomain_eval", _build_subdomain_eval, mods.get("subdomain_eval") or {}, styles)
+
+    # ── Vulnerability Scanning ──
+    _safe_extend(story, "nuclei",      _build_nuclei,      mods.get("nuclei") or {}, styles)
 
     # ── Reputation / Threat Intel ──
     _safe_extend(story, "breach",     _build_breach,     mods.get("breach") or {}, styles)
     _safe_extend(story, "blacklist",  _build_blacklist,  mods.get("blacklist") or {}, styles)
+    _safe_extend(story, "wayback",    _build_wayback,    mods.get("wayback") or {}, styles)
 
     # Pre-validate all Paragraphs so we get a useful error message if XML is broken
     import xml.etree.ElementTree as _ET
@@ -1743,7 +2274,7 @@ def _build_domain_overview(domains_data: list[dict], styles: dict) -> list:
 
 
 def _build_company_domain_section(d: dict, styles: dict) -> list:
-    """One section per domain: score strip, severity counts, top findings."""
+    """One section per domain: score strip, severity counts, all findings."""
     elems: list = [_section_header(f"DOMAIN — {str(d.get('domain', '')).upper()}", "🌐")]
     elems.append(_spacer(0.3))
 
@@ -1817,21 +2348,12 @@ def _build_company_domain_section(d: dict, styles: dict) -> list:
     elems.append(bt)
     elems.append(_spacer(0.35))
 
-    top = sorted(findings, key=lambda f: _RISK_ORDER.get((f.get("risk") or "low").lower(), 9))[:10]
-    if top:
-        elems.append(Paragraph(
-            f"Top {len(top)} Findings" + (" (by severity)" if len(findings) > 10 else ""),
-            styles["h2"],
-        ))
-        t = _findings_table(top, styles)
+    ranked = sorted(findings, key=lambda f: _RISK_ORDER.get((f.get("risk") or "low").lower(), 9))
+    if ranked:
+        elems.append(Paragraph(f"All {len(ranked)} Findings (by severity)", styles["h2"]))
+        t = _findings_table(ranked, styles)
         if t:
             elems.append(t)
-        if len(findings) > 10:
-            elems.append(_spacer(0.15))
-            elems.append(Paragraph(
-                _e(f"+ {len(findings) - 10} more findings — see the full per-domain report."),
-                styles["small"],
-            ))
     else:
         elems.append(Paragraph("No findings in the latest scan.", styles["body"]))
 
@@ -1860,15 +2382,195 @@ def _build_company_inventory(assets_summary: dict, styles: dict) -> list:
     return elems
 
 
+def _asset_table(rows: list[list], headers: list[str], col_widths: list[float]) -> Table:
+    """Generic detail table for the company asset-inventory listing sections."""
+    data = [headers] + rows
+    t = Table(data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+        ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+        ("FONTNAME",      (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+        ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+        ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+    ]))
+    return t
+
+
+def _build_company_asset_detail(assets: dict, styles: dict) -> list:
+    """Full per-asset listing (hosts, endpoints, ports, etc.) aggregated across
+    every domain of the company — the detail behind the inventory summary counts."""
+    elems: list = []
+
+    subs = assets.get("subdomains") or []
+    if subs:
+        elems.append(_section_header(f"SUBDOMAINS ({len(subs)})", "🔎"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for s in subs:
+            ips = ", ".join(s.get("ips") or []) or "—"
+            name = _e(s.get("value", "")) + (" 🆕" if s.get("is_new") else "")
+            rows.append([
+                Paragraph(name, styles["mono"]),
+                Paragraph(_e(s.get("domain", "")), styles["small"]),
+                Paragraph(_e(ips), styles["small_mono"]),
+                Paragraph(_e(s.get("http_status") if s.get("http_status") is not None else "—"), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Subdomain", "Domain", "IP(s)", "HTTP"],
+                                   [5.5 * cm, 3.5 * cm, 5 * cm, COL_W - 14 * cm]))
+        elems.append(_spacer(0.3))
+
+    ips = assets.get("ips") or []
+    if ips:
+        elems.append(_section_header(f"IP ADDRESSES ({len(ips)})", "🌐"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for ip in ips:
+            doms = ", ".join(ip.get("domains") or []) or "—"
+            ports = ", ".join(
+                f'{p.get("port")}/{p.get("service") or "?"}' for p in (ip.get("open_ports") or [])
+            ) or "—"
+            rows.append([
+                Paragraph(_e(ip.get("value", "")), styles["mono"]),
+                Paragraph(_e(doms), styles["small"]),
+                Paragraph(_e(ports), styles["small_mono"]),
+            ])
+        elems.append(_asset_table(rows, ["IP", "Domain(s)", "Open Ports"],
+                                   [3.5 * cm, 5 * cm, COL_W - 8.5 * cm]))
+        elems.append(_spacer(0.3))
+
+    endpoints = assets.get("endpoints") or []
+    if endpoints:
+        elems.append(_section_header(f"ENDPOINTS ({len(endpoints)})", "🔗"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for e in endpoints:
+            rows.append([
+                Paragraph(_e(e.get("value", "")), styles["mono"]),
+                Paragraph(_e(e.get("domain", "")), styles["small"]),
+                Paragraph(_e(e.get("source") or "—"), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Path", "Domain", "Source"],
+                                   [COL_W - 8 * cm, 4 * cm, 4 * cm]))
+        elems.append(_spacer(0.3))
+
+    techs = assets.get("technologies") or []
+    if techs:
+        elems.append(_section_header(f"TECHNOLOGIES ({len(techs)})", "⚙"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for tch in techs:
+            rows.append([
+                Paragraph(_e(tch.get("value", "")), styles["small"]),
+                Paragraph(_e(tch.get("category") or "—"), styles["small"]),
+                Paragraph(_e(tch.get("domain", "")), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Technology", "Category", "Domain"],
+                                   [6 * cm, 4 * cm, COL_W - 10 * cm]))
+        elems.append(_spacer(0.3))
+
+    admin_panels = assets.get("admin_panels") or []
+    if admin_panels:
+        elems.append(_section_header(f"ADMIN PANELS ({len(admin_panels)})", "🚪"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for a in admin_panels:
+            rows.append([
+                Paragraph(_e(a.get("value", "")), styles["mono"]),
+                Paragraph(_e(a.get("domain", "")), styles["small"]),
+                Paragraph(_e(a.get("http_status") if a.get("http_status") is not None else "—"), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["URL", "Domain", "HTTP"],
+                                   [COL_W - 7 * cm, 4 * cm, 3 * cm]))
+        elems.append(_spacer(0.3))
+
+    exposed_files = assets.get("exposed_files") or []
+    if exposed_files:
+        elems.append(_section_header(f"EXPOSED FILES ({len(exposed_files)})", "📂"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for ef in exposed_files:
+            sev = ef.get("risk", "low")
+            sev_col = RISK_COLOR.get(sev, C_INFO)
+            rows.append([
+                Paragraph(_e(ef.get("value", "")), styles["mono"]),
+                Paragraph(_e(ef.get("domain", "")), styles["small"]),
+                Paragraph(f'<font color="{sev_col.hexval()}">{sev.upper()}</font>', styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Path", "Domain", "Risk"],
+                                   [COL_W - 7 * cm, 4 * cm, 3 * cm]))
+        elems.append(_spacer(0.3))
+
+    ports = assets.get("ports") or []
+    if ports:
+        elems.append(_section_header(f"OPEN PORTS ({len(ports)})", "🔌"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for p in ports:
+            rows.append([
+                Paragraph(_e(p.get("ip", "")), styles["mono"]),
+                Paragraph(_e(p.get("port") if p.get("port") is not None else "—"), styles["small"]),
+                Paragraph(_e(p.get("service") or "—"), styles["small"]),
+                Paragraph(_e(p.get("domain", "")), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["IP", "Port", "Service", "Domain"],
+                                   [3.5 * cm, 1.8 * cm, 4 * cm, COL_W - 9.3 * cm]))
+        elems.append(_spacer(0.3))
+
+    apps = assets.get("apps") or []
+    if apps:
+        elems.append(_section_header(f"MOBILE APPS ({len(apps)})", "📱"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for a in apps:
+            name = _e(a.get("value", "")) + (" ⚠" if a.get("suspicious") else "")
+            rows.append([
+                Paragraph(name, styles["small"]),
+                Paragraph(_e(a.get("store") or "—"), styles["small"]),
+                Paragraph(_e(a.get("os") or "—"), styles["small"]),
+                Paragraph(_e(a.get("version") or "—"), styles["small"]),
+                Paragraph(_e(a.get("developer") or "—"), styles["small"]),
+                Paragraph(_e(a.get("domain", "")), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Name", "Store", "OS", "Version", "Developer", "Domain"],
+                                   [4 * cm, 2.2 * cm, 1.5 * cm, 2 * cm, 3.5 * cm, COL_W - 13.2 * cm]))
+        elems.append(_spacer(0.3))
+
+    neighbors = assets.get("neighbors") or []
+    if neighbors:
+        elems.append(_section_header(f"NEIGHBORS — SHARED HOSTING ({len(neighbors)})", "🧭"))
+        elems.append(_spacer(0.2))
+        rows = []
+        for n in neighbors:
+            rows.append([
+                Paragraph(_e(n.get("value", "")), styles["mono"]),
+                Paragraph(_e(n.get("ip") or "—"), styles["small_mono"]),
+                Paragraph(_e(n.get("neighbor_of") or "—"), styles["small"]),
+                Paragraph(_e(n.get("domain", "")), styles["small"]),
+            ])
+        elems.append(_asset_table(rows, ["Domain", "IP", "Neighbor Of", "Company Domain"],
+                                   [5 * cm, 3 * cm, 4 * cm, COL_W - 12 * cm]))
+        elems.append(_spacer(0.3))
+
+    return elems
+
+
 def generate_company_pdf(
     company_name: str,
     domains_data: list[dict],
     assets_summary: dict | None = None,
+    assets_detail: dict | None = None,
 ) -> bytes:
     """
     Build a consolidated PDF report for a company from per-domain findings data
     (same shape as GET /api/companies/{id}/findings domains) plus an optional
-    aggregated asset-inventory summary. Returns the PDF as bytes.
+    aggregated asset-inventory summary and an optional full asset listing
+    (subdomains, IPs, endpoints, ports, etc. — same shape as GET
+    /api/companies/{id}/assets `assets`). Returns the PDF as bytes.
     """
     buf = io.BytesIO()
     styles = _build_styles()
@@ -1911,6 +2613,10 @@ def generate_company_pdf(
 
     for d in domains_data:
         _safe_extend(story, f"domain:{d.get('domain')}", _build_company_domain_section, d, styles)
+
+    if assets_detail:
+        story.append(PageBreak())
+        _safe_extend(story, "asset_detail", _build_company_asset_detail, assets_detail, styles)
 
     import xml.etree.ElementTree as _ET
     for idx, elem in enumerate(story):

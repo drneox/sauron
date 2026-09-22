@@ -24,6 +24,7 @@ def run(domain: str) -> dict[str, Any]:
         "org": None,
         "raw": None,
         "risk": "low",
+        "findings": [],
     }
     try:
         w = whois.whois(domain)
@@ -54,8 +55,15 @@ def run(domain: str) -> dict[str, Any]:
                 days_left = (exp - datetime.utcnow()).days
                 if days_left < 30:
                     result["risk"] = "critical"
+                    result["findings"].append(
+                        f"Domain expires in {days_left} day(s) — renew immediately, "
+                        "an expired domain can be re-registered by an attacker (hijack risk)"
+                    )
                 elif days_left < 90:
                     result["risk"] = "medium"
+                    result["findings"].append(
+                        f"Domain expires in {days_left} day(s) — schedule renewal soon"
+                    )
 
     except Exception as e:
         logger.error(f"[whois] {domain}: {e}")
