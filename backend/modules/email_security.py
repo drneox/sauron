@@ -7,25 +7,41 @@ Microsoft's public OpenID / GetUserRealm endpoints.
 import dns.resolver
 import re
 import logging
+import time
 import httpx
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
+def _query_txt_checked(domain: str) -> tuple[list[str], bool]:
+    """TXT records plus whether the answer is definitive.
+
+    NXDOMAIN / empty answer mean the record really does not exist. A timeout or
+    SERVFAIL says nothing about the record, so it is retried once and then
+    reported as inconclusive rather than being read as "missing".
+    """
+    for attempt in (1, 2):
+        try:
+            resolver = dns.resolver.Resolver()
+            resolver.timeout = 5
+            resolver.lifetime = 5
+            answers = resolver.resolve(domain, "TXT")
+            return [str(r).strip('"') for r in answers], True
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return [], True
+        except Exception:
+            if attempt == 1:
+                time.sleep(0.5)
+    return [], False
+
+
 def _query_txt(domain: str) -> list[str]:
-    try:
-        resolver = dns.resolver.Resolver()
-        resolver.timeout = 5
-        resolver.lifetime = 5
-        answers = resolver.resolve(domain, "TXT")
-        return [str(r).strip('"') for r in answers]
-    except Exception:
-        return []
+    return _query_txt_checked(domain)[0]
 
 
 def _check_spf(domain: str) -> dict:
-    records = _query_txt(domain)
+    records, definitive = _query_txt_checked(domain)
     spf_records = [r for r in records if r.startswith("v=spf1")]
 
     result = {
@@ -33,8 +49,13 @@ def _check_spf(domain: str) -> dict:
         "record": spf_records[0] if spf_records else None,
         "multiple_records": len(spf_records) > 1,
         "policy": None,
+        "lookup_error": not definitive,
         "findings": [],
     }
+
+    if not definitive and not spf_records:
+        result["findings"].append("SPF lookup inconclusive (DNS error) — record could not be verified")
+        return result
 
     if not spf_records:
         result["findings"].append("No SPF record found — email spoofing possible")
@@ -68,7 +89,7 @@ def _check_spf(domain: str) -> dict:
 
 def _check_dmarc(domain: str) -> dict:
     dmarc_domain = f"_dmarc.{domain}"
-    records = _query_txt(dmarc_domain)
+    records, definitive = _query_txt_checked(dmarc_domain)
     dmarc_records = [r for r in records if r.startswith("v=DMARC1")]
 
     result = {
@@ -78,8 +99,13 @@ def _check_dmarc(domain: str) -> dict:
         "pct": 100,
         "rua": None,
         "ruf": None,
+        "lookup_error": not definitive,
         "findings": [],
     }
+
+    if not definitive and not dmarc_records:
+        result["findings"].append("DMARC lookup inconclusive (DNS error) — record could not be verified")
+        return result
 
     if not dmarc_records:
         result["findings"].append("No DMARC record found — email authentication not enforced")
@@ -372,12 +398,16 @@ def run(domain: str) -> dict[str, Any]:
     all_findings = spf["findings"] + dmarc["findings"] + dkim["findings"] + provider["findings"]
 
     # Risk assessment
+    # A failed lookup is not evidence of absence — only assert "missing" when
+    # the DNS answer was definitive.
+    spf_missing = not spf["exists"] and not spf.get("lookup_error")
+    dmarc_missing = not dmarc["exists"] and not dmarc.get("lookup_error")
     risk = "low"
-    if not spf["exists"] and not dmarc["exists"]:
+    if spf_missing and dmarc_missing:
         risk = "critical"
-    elif not dmarc["exists"] or dmarc["policy"] == "none":
+    elif dmarc_missing or dmarc["policy"] == "none":
         risk = "high"
-    elif not spf["exists"] or dmarc["policy"] == "quarantine":
+    elif spf_missing or dmarc["policy"] == "quarantine":
         risk = "medium"
     elif spf.get("policy") in ("~all", "?all", "+all"):
         risk = "medium"

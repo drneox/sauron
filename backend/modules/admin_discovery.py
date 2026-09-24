@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from modules.common import afetch, fetch, make_async_client
+from modules.common import afetch, fetch, is_same_path_redirect, make_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,9 @@ async def _probe(client: httpx.AsyncClient, base_url: str, path: str, baseline: 
     # 301/302 — redirects are not proof of an exposed panel; informational only
     if status in (301, 302):
         location = r.headers.get("location", "")
-        if not _redirect_looks_real(location, base_url):
+        # A same-path redirect (e.g. apex -> www) merely echoes the probed
+        # "/admin" back in the URL, which would otherwise trip the login regex.
+        if is_same_path_redirect(url, location) or not _redirect_looks_real(location, base_url):
             return None
         return {"path": path, "url": url, "status": status,
                 "severity": "info", "content_type": ct,
@@ -268,7 +270,7 @@ def run(domain: str) -> dict[str, Any]:
         risk = risk if risk in ("critical", "high") else "medium"
         findings.append(f"{len(medium)} path(s) redirecting to auth/admin endpoints")
     if restricted:
-        findings.append(f"{len(restricted)} path(s) blocked with 403 (protected/forbidden, not exposed): " + ", ".join(f["path"] for f in restricted[:5]))
+        findings.append(f"{len(restricted)} path(s) blocked or redirected to login (protected, not exposed): " + ", ".join(f["path"] for f in restricted[:5]))
 
     return {
         "status":           "ok",

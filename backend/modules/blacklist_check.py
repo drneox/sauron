@@ -50,6 +50,15 @@ def _reverse_ip(ip: str) -> str:
     return ".".join(reversed(ip.split(".")))
 
 
+def _is_refusal(code: str) -> bool:
+    """127.255.255.x are DNSBL *error* answers, never listings.
+
+    Spamhaus replies 127.255.255.254 to any query arriving through a public /
+    open resolver (even for 8.8.8.8) and 127.255.255.255 on excessive volume.
+    """
+    return code.startswith("127.255.255.")
+
+
 def _check_dnsbl(ip: str, dnsbl: str, label: str) -> dict | None:
     """Check a single DNSBL. Returns dict if listed, None if clean."""
     reversed_ip = _reverse_ip(ip)
@@ -60,6 +69,9 @@ def _check_dnsbl(ip: str, dnsbl: str, label: str) -> dict | None:
         resolver.lifetime = 3
         answers = resolver.resolve(query, "A")
         codes = [str(a) for a in answers]
+        if codes and all(_is_refusal(c) for c in codes):
+            return {"list": label, "dnsbl": dnsbl, "codes": codes, "refused": True}
+        codes = [c for c in codes if not _is_refusal(c)]
 
         # Decode Spamhaus return codes
         details = None
@@ -98,10 +110,13 @@ def _check_domain_dnsbl(domain: str, dnsbl: str, label: str) -> dict | None:
         resolver.timeout = 3
         resolver.lifetime = 3
         answers = resolver.resolve(query, "A")
+        codes = [str(a) for a in answers]
+        if codes and all(_is_refusal(c) for c in codes):
+            return {"list": label, "dnsbl": dnsbl, "codes": codes, "refused": True}
         return {
             "list": label,
             "dnsbl": dnsbl,
-            "codes": [str(a) for a in answers],
+            "codes": [c for c in codes if not _is_refusal(c)],
             "details": None,
         }
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.exception.Timeout):
@@ -193,6 +208,7 @@ def run(domain: str) -> dict[str, Any]:
     # Check DNSBLs concurrently using threads
     import concurrent.futures
     listed_on = []
+    refused: list[str] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         # IP-based checks
@@ -208,7 +224,9 @@ def run(domain: str) -> dict[str, Any]:
 
         for future in concurrent.futures.as_completed({**ip_futures, **domain_futures}):
             result = future.result()
-            if result:
+            if result and result.get("refused"):
+                refused.append(result["list"])
+            elif result:
                 listed_on.append(result)
 
     # Threat intelligence checks
@@ -224,6 +242,12 @@ def run(domain: str) -> dict[str, Any]:
         for entry in listed_on:
             detail = f" ({entry['details']})" if entry.get("details") else ""
             findings.append(f"IP {primary_ip} listed on {entry['list']}{detail}")
+
+    if refused:
+        findings.append(
+            f"Blocklist check inconclusive: {len(refused)} list(s) refused the query "
+            "(public or rate-limited DNS resolver) — results are a lower bound"
+        )
 
     if urlhaus.get("found"):
         risk = "critical"
@@ -250,6 +274,7 @@ def run(domain: str) -> dict[str, Any]:
         "dnsbl_count": len(DNSBL_LISTS) + len(DOMAIN_LISTS),
         "listed_on": listed_on,
         "listing_count": len(listed_on),
+        "refused_lists": refused,
         "clean": len(listed_on) == 0,
         "spamhaus_listed": spamhaus_listed,
         "barracuda_listed": barracuda_listed,

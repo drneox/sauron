@@ -76,11 +76,14 @@ def _get_tls_info(hostname: str, port: int = 443) -> dict:
         ("TLSv1.2", ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_2),
     ]:
         try:
+            # Protocol support only — certificate validity is checked elsewhere.
+            # A bare SSLContext has an EMPTY trust store, so verifying here made
+            # every probe fail and reported "neither TLS 1.2 nor 1.3" for all hosts.
             ctx2 = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ctx2.minimum_version = min_version
             ctx2.maximum_version = max_version
-            ctx2.check_hostname = True
-            ctx2.verify_mode = ssl.CERT_REQUIRED
+            ctx2.check_hostname = False
+            ctx2.verify_mode = ssl.CERT_NONE
             with socket.create_connection((hostname, port), timeout=5) as s:
                 with ctx2.wrap_socket(s, server_hostname=hostname):
                     if proto_name == "TLSv1.3":
@@ -89,6 +92,12 @@ def _get_tls_info(hostname: str, port: int = 443) -> dict:
                         result["supports_tls12"] = True
         except Exception:
             pass
+
+    # The connection that already succeeded is ground truth for what the server speaks.
+    if result["protocol"] == "TLSv1.3":
+        result["supports_tls13"] = True
+    elif result["protocol"] == "TLSv1.2":
+        result["supports_tls12"] = True
 
     # Check TLS 1.0/1.1 support (deprecated)
     for proto_name, min_ver, max_ver in [
@@ -134,7 +143,8 @@ def _check_hsts(domain: str) -> dict:
         }
     except Exception:
         return {"header": None, "present": False, "max_age": 0,
-                "include_subdomains": False, "preload": False, "preload_eligible": False}
+                "include_subdomains": False, "preload": False, "preload_eligible": False,
+                "error": True}
 
 
 def run(domain: str) -> dict[str, Any]:
@@ -185,7 +195,9 @@ def run(domain: str) -> dict[str, Any]:
         risk = "high"
 
     # HSTS
-    if not hsts["present"]:
+    if hsts.get("error"):
+        pass  # request failed: absence of the header is unknown, don't claim it
+    elif not hsts["present"]:
         findings.append("HSTS header missing — no forced HTTPS enforcement")
         risk = max(risk, "medium", key=lambda r: {"low":0,"medium":1,"high":2,"critical":3}.get(r,0))
     elif hsts["max_age"] < 31536000:
