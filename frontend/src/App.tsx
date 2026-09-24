@@ -298,6 +298,36 @@ export default function App() {
   const [scanMenuOpen, setScanMenuOpen] = useState(false)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
 
+  // The header's backdrop-blur makes it the containing block for `fixed`
+  // descendants, so a full-screen click-catcher inside it only covers the
+  // header itself — close the menus from document-level listeners instead.
+  useEffect(() => {
+    setScanMenuOpen(false)
+    setUserMenuOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!scanMenuOpen && !userMenuOpen) return
+    const onPointerDown = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-nav-menu]')) {
+        setScanMenuOpen(false)
+        setUserMenuOpen(false)
+      }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setScanMenuOpen(false)
+        setUserMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [scanMenuOpen, userMenuOpen])
+
   useEffect(() => {
     let cancelled = false
     setUnauthorizedHandler(() => {
@@ -354,9 +384,13 @@ export default function App() {
   const navItems: NavItem[] = [
     { to: '/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
     { to: '/companies', label: t('nav.companies'), icon: Building2 },
-    ...(isAdmin ? [{ to: '/users', label: t('nav.users'), icon: Users }] : []),
-    ...(isAdmin ? [{ to: '/settings', label: t('nav.settings'), icon: Settings }] : []),
   ]
+  const adminItems: NavItem[] = isAdmin
+    ? [
+        { to: '/users', label: t('nav.users'), icon: Users },
+        { to: '/settings', label: t('nav.settings'), icon: Settings },
+      ]
+    : []
 
   const scanMenuActive = ['/scan', '/agent', '/history', '/scanning'].some((p) => location.pathname.startsWith(p))
 
@@ -376,7 +410,7 @@ export default function App() {
         </button>
         <nav className="flex gap-1 text-sm items-center">
           {!readOnly && (
-            <div className="relative">
+            <div className="relative" data-nav-menu>
               <button
                 onClick={() => setScanMenuOpen((o) => !o)}
                 className={clsx(
@@ -387,13 +421,12 @@ export default function App() {
                 )}
               >
                 <ScanSearch className="w-4 h-4" />
-                {t('nav.scan')}
+                <span className="hidden sm:inline">{t('nav.scan')}</span>
                 <ChevronDown className={clsx('w-3.5 h-3.5 transition-transform duration-150', scanMenuOpen && 'rotate-180')} />
               </button>
               {scanMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => setScanMenuOpen(false)} />
-                  <div className="absolute left-0 top-full mt-1.5 z-50 card p-1.5 min-w-[190px] shadow-lg">
+                    <div className="absolute left-0 top-full mt-1.5 z-50 card p-1.5 min-w-[190px] shadow-lg">
                     {[
                       { to: '/scan', label: t('nav.newScan'), desc: t('nav.newScanDesc'), icon: ScanSearch },
                       { to: '/agent', label: t('nav.agentScan'), desc: t('nav.agentScanDesc'), icon: Bot },
@@ -420,6 +453,7 @@ export default function App() {
             <NavLink
               key={item.to}
               to={item.to}
+              title={item.label}
               className={({ isActive }) => clsx(
                 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors duration-150',
                 isActive
@@ -428,37 +462,49 @@ export default function App() {
               )}
             >
               <item.icon className="w-4 h-4" />
-              {item.label}
+              <span className="hidden sm:inline">{item.label}</span>
             </NavLink>
           ))}
           <span className="w-px h-5 bg-dark-800 mx-2" />
-          <button
-            onClick={() => i18n.changeLanguage(i18n.language === 'es' ? 'en' : 'es')}
-            title={t('nav.language')}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-dark-500 hover:text-dark-100 hover:bg-dark-900 transition-colors duration-150"
-          >
-            <Languages className="w-4 h-4" />
-            <span className="text-xs font-semibold uppercase">{i18n.language === 'es' ? 'ES' : 'EN'}</span>
-          </button>
-          <div className="relative">
+          <div className="relative" data-nav-menu>
             <button
               onClick={() => setUserMenuOpen((o) => !o)}
               className={clsx(
                 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors duration-150',
-                userMenuOpen ? 'bg-dark-900 text-dark-100' : 'text-dark-500 hover:text-dark-100 hover:bg-dark-900',
+                userMenuOpen || adminItems.some((i) => location.pathname.startsWith(i.to)) ? 'bg-cyber-100 text-cyber-700' : 'text-dark-500 hover:text-dark-100 hover:bg-dark-900',
               )}
             >
-              <span className="text-xs font-mono">{user.email}</span>
+              <span className="w-6 h-6 rounded-full bg-cyber-100 text-cyber-700 text-xs font-semibold uppercase flex items-center justify-center">
+                {user.email.charAt(0)}
+              </span>
               <ChevronDown className={clsx('w-3.5 h-3.5 transition-transform duration-150', userMenuOpen && 'rotate-180')} />
             </button>
             {userMenuOpen && (
               <>
-                <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-                <div className="absolute right-0 top-full mt-1.5 z-50 card p-1.5 min-w-[180px] shadow-lg">
+                <div className="absolute right-0 top-full mt-1.5 z-50 card p-1.5 min-w-[200px] shadow-lg">
                   <div className="px-3 py-2 border-b border-dark-800 mb-1">
                     <div className="text-xs font-medium text-dark-100">{user.email}</div>
                     <div className="text-[10px] text-dark-500 uppercase tracking-wider mt-0.5">{user.role}</div>
                   </div>
+                  {adminItems.map((item) => (
+                    <button
+                      key={item.to}
+                      onClick={() => { navigate(item.to); setUserMenuOpen(false) }}
+                      className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm text-dark-200 hover:bg-cyber-50 transition-colors duration-150"
+                    >
+                      <item.icon className="w-4 h-4 text-cyber-600" />
+                      {item.label}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() => i18n.changeLanguage(i18n.language === 'es' ? 'en' : 'es')}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm text-dark-200 hover:bg-cyber-50 transition-colors duration-150"
+                  >
+                    <Languages className="w-4 h-4 text-cyber-600" />
+                    <span className="flex-1">{t('nav.language')}</span>
+                    <span className="text-xs font-semibold uppercase text-dark-500">{i18n.language === 'es' ? 'ES' : 'EN'}</span>
+                  </button>
+                  <div className="border-t border-dark-800 my-1" />
                   <button
                     onClick={() => { setUserMenuOpen(false); handleLogout() }}
                     className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-sm text-red-600 hover:bg-red-50 transition-colors duration-150"
