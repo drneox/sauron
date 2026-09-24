@@ -414,18 +414,42 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         app_entry["llm_verdict"] = verdicts.get((app_entry["store"], app_entry["name"]))
         app_entry.setdefault("official_developer", False)
 
-    if ai_available and candidates and not verdicts:
-        # AI configured but the call failed (rate limit, outage): without a
-        # verdict nothing would be filtered, flooding the inventory with store
-        # noise. Fall back to the name-match heuristic for the suspicious list.
-        logger.warning(f"[mobile_apps] LLM unavailable for '{brand}' — name-match fallback")
-        result["suspicious"] = [
-            a for a in result["suspicious"] if _matches_brand(a.get("name") or "", brand)
-        ]
+    # Impersonation needs evidence, not just a store hit. An app is reported only
+    # when the brand name appears in ITS OWN name (that is what impersonating a
+    # brand means) and the developer is unrelated to the company:
+    #   - confirmed:  the LLM also judged it "suspicious"           -> medium
+    #   - unverified: no verdict (AI unavailable/failed), name match only -> info
+    # "unrelated" apps (name collisions) are dropped everywhere; "official" ones
+    # published under another developer (subsidiaries) move to the official list.
+    brand_norm = _normalize(brand)
 
-    # When the LLM classified, drop "unrelated" from the official apps list —
-    # a third-party app that merely shares a word with the brand is not the
-    # company's asset (e.g. "Banco del Pacífico" ≠ "Pacífico Seguros").
+    def name_has_brand(entry: dict) -> bool:
+        return bool(brand_norm) and brand_norm in _normalize(entry.get("name") or "")
+
+    if not verdicts and ai_available and candidates:
+        logger.warning(f"[mobile_apps] LLM unavailable for '{brand}' — impersonation findings left unverified")
+
+    confirmed: list[dict] = []
+    unverified: list[dict] = []
+    for entry in result["suspicious"]:
+        verdict = entry.get("llm_verdict")
+        if verdict == "unrelated":
+            continue
+        if verdict == "official":
+            result["apps"].append(entry)
+            continue
+        if not name_has_brand(entry):
+            continue
+        if verdict == "suspicious":
+            entry["impersonation"] = "confirmed"
+            confirmed.append(entry)
+        elif verdict is None:
+            entry["impersonation"] = "unverified"
+            unverified.append(entry)
+    result["suspicious"] = confirmed + unverified
+
+    # A third-party app that merely shares a word with the brand is not the
+    # company's asset (e.g. "Banco del Pacífico" != "Pacífico Seguros").
     if verdicts:
         result["apps"] = [a for a in result["apps"] if a.get("llm_verdict") != "unrelated"]
 
@@ -434,17 +458,25 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         result["error"] = "; ".join(errors)
 
     seen = set()
-    for app_entry in result["suspicious"]:
-        key = (app_entry["store"], app_entry["name"])
+    for entry in result["suspicious"]:
+        key = (entry["store"], entry["name"])
         if key in seen:
             continue
         seen.add(key)
-        result["findings"].append(
-            f"Possible brand impersonation: {app_entry['store']} app '{app_entry['name']}' "
-            f"by '{app_entry['developer']}' does not match brand '{brand}'"
-        )
+        link = f" — {entry['url']}" if entry.get("url") else ""
+        if entry["impersonation"] == "confirmed":
+            result["findings"].append(
+                f"Possible brand impersonation: {entry['store']} app '{entry['name']}' by "
+                f"'{entry['developer']}' uses the brand '{brand}' in its name and the developer "
+                f"is unrelated to the company (AI-verified){link}"
+            )
+        else:
+            result["findings"].append(
+                f"Unverified: {entry['store']} app '{entry['name']}' by '{entry['developer']}' "
+                f"uses the brand '{brand}' in its name; AI verification was unavailable, "
+                f"review manually{link}"
+            )
 
-    if result["suspicious"]:
-        result["risk"] = "medium"
+    result["risk"] = "medium" if confirmed else "low"
 
     return result
