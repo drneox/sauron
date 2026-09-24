@@ -1013,11 +1013,15 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         if not isinstance(mod_result, dict):
             continue
         for finding in mod_result.get("findings") or []:
+            category = _finding_category(mod_name, finding)
             all_findings.append({
                 "module": mod_name,
                 "finding": finding,
-                "risk": mod_result.get("risk", "low"),
-                "category": _finding_category(mod_name, finding),
+                # Informational findings carry no risk of their own; without this
+                # they'd inherit the module's worst risk (e.g. "Email hosted on
+                # Google Workspace" shown as HIGH).
+                "risk": "info" if category == "info" else mod_result.get("risk", "low"),
+                "category": category,
             })
 
     # Discovery passes build inventory only — no rating, no grade: they never
@@ -1302,7 +1306,7 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         module = f.get("module") or "unknown"
         fp = _finding_fingerprint(dom.domain, module, text)
         seen_fps.add(fp)
-        risk = f.get("risk") if f.get("risk") in RISK_ORDER else "low"
+        risk = f.get("risk") if f.get("risk") in RISK_ORDER or f.get("risk") == "info" else "low"
         category = f.get("category") or _finding_category(module, f.get("finding"))
         frameworks = compliance.frameworks_for(module, text)
         existing = await Finding.get_or_none(domain_id=dom.id, fingerprint=fp)
@@ -2903,7 +2907,7 @@ async def _build_company_findings(company: Company) -> dict:
             "completed_at": latest.completed_at,
             "findings": result.get("findings") or [],
         })
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     # Category totals mirror the scoring model's classification (see
     # MODULE_FINDING_CATEGORY / _finding_category) — vulnerability/
     # misconfiguration/exposure are the categories that actually affect the
@@ -2976,11 +2980,11 @@ async def company_remediations(company_id: int):
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
     domains, records = await _company_findings_records(company_id)
-    risk_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    risk_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     by_domain: dict[int, list[dict]] = {d.id: [] for d in domains}
     totals = {
         "open": 0, "accepted": 0, "fixed": 0,
-        "by_risk": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "by_risk": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "auto_fixed_week": 0,
     }
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
@@ -3069,6 +3073,10 @@ async def company_compliance(company_id: int):
     }
     untagged = {"open": 0, "total": 0}
     for rec in records:
+        # Compliance measures defects mapped to controls. Informational findings
+        # are neither fixable nor a gap, and would inflate every denominator.
+        if rec.category == "info":
+            continue
         frameworks = rec.frameworks or []
         if not frameworks:
             untagged["total"] += 1

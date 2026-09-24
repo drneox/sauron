@@ -23,7 +23,8 @@ export interface ScanRequestPayload {
 export interface Finding {
   module: string
   finding: string
-  risk: RiskLevel
+  // "info" = informational finding (category info): no risk of its own
+  risk: RiskLevel | 'info'
 }
 
 export interface Scorecard {
