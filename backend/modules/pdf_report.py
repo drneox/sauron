@@ -230,7 +230,7 @@ def _cover_page_bg(c: pdfcanvas.Canvas, doc):
     # Footer text
     c.setFillColor(colors.HexColor("#475569"))
     c.setFont("Helvetica", 7)
-    c.drawCentredString(PAGE_W / 2, 12, "SAURON — Automated Security Assessment · by Carlos Ganoza")
+    c.drawCentredString(PAGE_W / 2, 12, "SAURON ASM — Automated Security Assessment")
     c.restoreState()
 
 
@@ -244,7 +244,7 @@ def _content_page_bg(c: pdfcanvas.Canvas, doc):
 
     c.setFillColor(C_CYBER)
     c.setFont("Helvetica-Bold", 9)
-    c.drawString(MARGIN_L, PAGE_H - 18, "SAURON")
+    c.drawString(MARGIN_L, PAGE_H - 18, "SAURON ASM")
 
     c.setFillColor(colors.white)
     c.setFont("Helvetica", 8)
@@ -387,7 +387,7 @@ def _build_cover(domain: str, report: dict, styles: dict) -> list:
 
     # Brand label
     elems.append(Paragraph(
-        '<font color="#10b981">SAURON</font>',
+        '<font color="#10b981">SAURON ASM</font>',
         ParagraphStyle("brand", fontName="Helvetica-Bold", fontSize=13,
                        textColor=C_CYBER, alignment=TA_CENTER, leading=18,
                        letterSpacing=4),
@@ -2002,7 +2002,7 @@ def generate_pdf(report: dict) -> bytes:
         topMargin=MARGIN_T + 30,   # extra top for header band on content pages
         bottomMargin=MARGIN_B + 22, # extra bottom for footer band
         title=f"Security Assessment — {domain}",
-        author="Sauron",
+        author="Sauron ASM",
         subject="Automated ASM Report",
     )
     doc._report_domain = domain
@@ -2164,7 +2164,7 @@ def _build_company_cover(
     elems.append(Spacer(1, 4.2 * cm))
 
     elems.append(Paragraph(
-        '<font color="#10b981">SAURON</font>',
+        '<font color="#10b981">SAURON ASM</font>',
         ParagraphStyle("brand", fontName="Helvetica-Bold", fontSize=13,
                        textColor=C_CYBER, alignment=TA_CENTER, leading=18,
                        letterSpacing=4),
@@ -2588,7 +2588,7 @@ def generate_company_pdf(
         topMargin=MARGIN_T + 30,
         bottomMargin=MARGIN_B + 22,
         title=f"Consolidated Security Report — {company_name}",
-        author="Sauron",
+        author="Sauron ASM",
         subject="Consolidated ASM Report",
     )
     doc._report_domain = company_name
