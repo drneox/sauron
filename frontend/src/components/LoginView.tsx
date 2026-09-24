@@ -195,7 +195,8 @@ export default function LoginView({ onLogin }: Props) {
             {t('login.protected')}
           </p>
           <p className="text-center text-xs text-dark-600">
-            by Carlos Ganoza
+            Sauron ASM — © {new Date().getFullYear()}{' '}
+            <a href="https://sauron.punkbot.ai" target="_blank" rel="noopener noreferrer" className="hover:text-dark-400 transition-colors duration-150">punkbot.ai</a>
           </p>
         </div>
       </div>
