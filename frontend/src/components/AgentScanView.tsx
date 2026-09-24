@@ -183,7 +183,7 @@ export default function AgentScanView({ onBack, scanId }: Props) {
   const riskOrder: RiskLevel[] = ['critical', 'high', 'medium', 'low']
   const findingsByRisk = (scan?.findings ?? []).reduce<Record<RiskLevel, Finding[]>>(
     (acc, f) => {
-      const r = riskOrder.includes(f.risk) ? f.risk : 'low'
+      const r: RiskLevel = (riskOrder as string[]).includes(f.risk) ? (f.risk as RiskLevel) : 'low'
       acc[r].push(f)
       return acc
     },

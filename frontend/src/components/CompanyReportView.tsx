@@ -26,7 +26,7 @@ import { LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
 interface FindingRow {
   module: string
   finding: string
-  risk: 'low' | 'medium' | 'high' | 'critical'
+  risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category?: 'vulnerability' | 'misconfiguration' | 'exposure' | 'info'
 }
 
@@ -50,7 +50,7 @@ interface CompanyFindingsResponse {
   company_id: number
   company_name: string
   generated_at: string
-  totals: { critical: number; high: number; medium: number; low: number }
+  totals: { critical: number; high: number; medium: number; low: number; info: number }
   category_totals: CategoryTotals
   domains: DomainFindings[]
 }
@@ -70,7 +70,7 @@ interface Props {
   onOpenReport: (scanId: string) => void
 }
 
-const RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
+const RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }
 
 // Full findings list of one domain, severity-sorted (critical first) and
 // paginated with its own local page state.
@@ -246,7 +246,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
         </div>
         {data && (
           <div className="flex items-center gap-2">
-            {(['critical', 'high', 'medium', 'low'] as const).map((r) => (
+            {(['critical', 'high', 'medium', 'low', 'info'] as const).map((r) => (
               <span key={r} className="inline-flex items-center gap-1.5 text-xs">
                 <RiskBadge risk={r} />
                 <span className="font-mono font-semibold text-dark-200">{data.totals[r]}</span>
@@ -294,7 +294,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
 
       {/* Per-domain cards */}
       {data?.domains.map((d) => {
-        const counts = { critical: 0, high: 0, medium: 0, low: 0 }
+        const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 }
         for (const f of d.findings) {
           if (f.risk in counts) counts[f.risk]++
         }
@@ -315,7 +315,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
               <span className="flex-1" />
               {d.scan_id && (
                 <div className="flex items-center gap-2">
-                  {(['critical', 'high', 'medium', 'low'] as const).map((r) => (
+                  {(['critical', 'high', 'medium', 'low', 'info'] as const).map((r) => (
                     <span key={r} className="inline-flex items-center gap-1 text-[11px]" title={`${counts[r]} ${r}`}>
                       <RiskBadge risk={r} />
                       <span className="font-mono font-semibold text-dark-200">{counts[r]}</span>

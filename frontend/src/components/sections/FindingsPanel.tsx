@@ -5,7 +5,7 @@ import { AlertCircle, AlertOctagon, AlertTriangle, Info, Search, type LucideIcon
 import { useTranslation } from 'react-i18next'
 
 const RISK_ICON: Record<string, LucideIcon> = {
-  critical: AlertOctagon, high: AlertTriangle, medium: AlertCircle, low: Info,
+  critical: AlertOctagon, high: AlertTriangle, medium: AlertCircle, low: Info, info: Info,
 }
 
 const RISK_COLOR: Record<string, string> = {
@@ -13,6 +13,7 @@ const RISK_COLOR: Record<string, string> = {
   high: 'border-l-orange-500 bg-orange-50 text-orange-600',
   medium: 'border-l-amber-500 bg-amber-50 text-amber-600',
   low: 'border-l-emerald-500 bg-emerald-50 text-emerald-600',
+  info: 'border-l-sky-400 bg-sky-50 text-sky-600',
 }
 
 const MODULE_LABEL: Record<string, string> = {
@@ -31,7 +32,7 @@ interface Props {
 export default function FindingsPanel({ findings, baseUrl }: Props) {
   const { t } = useTranslation()
   const list = findings ?? []
-  const grouped = ['critical', 'high', 'medium', 'low'].flatMap(risk =>
+  const grouped = ['critical', 'high', 'medium', 'low', 'info'].flatMap(risk =>
     list.filter(f => f.risk === risk)
   )
 
@@ -40,7 +41,7 @@ export default function FindingsPanel({ findings, baseUrl }: Props) {
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-[15px] font-semibold tracking-tight text-dark-100 flex items-center gap-2"><Search className="w-4 h-4 text-cyber-600" /> {t('report.findings.title')}</h2>
         <div className="flex gap-2 text-xs">
-          {['critical', 'high', 'medium', 'low'].map(r => {
+          {['critical', 'high', 'medium', 'low', 'info'].map(r => {
             const count = list.filter(f => f.risk === r).length
             if (!count) return null
             return (
@@ -50,6 +51,7 @@ export default function FindingsPanel({ findings, baseUrl }: Props) {
                 r === 'high' && 'bg-orange-100 text-orange-600 border-orange-300/50',
                 r === 'medium' && 'bg-amber-100 text-amber-600 border-amber-200',
                 r === 'low' && 'bg-emerald-100 text-emerald-600 border-emerald-200',
+                r === 'info' && 'bg-sky-100 text-sky-600 border-sky-200',
               )}>
                 {count} {r}
               </span>

@@ -19,7 +19,7 @@ export interface RemediationFinding {
   id: number
   module: string
   text: string
-  risk: 'low' | 'medium' | 'high' | 'critical'
+  risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category: string
   frameworks: string[]
   status: 'open' | 'accepted' | 'fixed'
@@ -169,7 +169,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
         </div>
         {data && (
           <div className="flex items-center gap-2">
-            {(['critical', 'high', 'medium', 'low'] as const).map((r) => (
+            {(['critical', 'high', 'medium', 'low', 'info'] as const).map((r) => (
               <span key={r} className="inline-flex items-center gap-1.5 text-xs" title={t('remediation.openByRisk')}>
                 <RiskBadge risk={r} />
                 <span className="font-mono font-semibold text-dark-200">{data.totals.by_risk[r] ?? 0}</span>

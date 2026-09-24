@@ -139,7 +139,7 @@ class Finding(Model):
     fingerprint = fields.TextField()  # sha1(domain|module|normalized text)
     module = fields.CharField(max_length=64)
     text = fields.TextField()
-    risk = fields.CharField(max_length=16)  # critical|high|medium|low
+    risk = fields.CharField(max_length=16)  # critical|high|medium|low|info
     category = fields.CharField(max_length=32, default="info")  # vulnerability|misconfiguration|exposure|info
     frameworks = fields.JSONField(default=list)  # e.g. ["NIST-CSF", "ISO-27001"]
     status = fields.CharField(max_length=16, default="open")  # open|accepted|fixed

@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, X } from 'lucide-react'
 import axios from 'axios'
 
-export function RiskBadge({ risk }: { risk: RiskLevel }) {
+export function RiskBadge({ risk }: { risk: RiskLevel | 'info' }) {
   return (
     <span className={clsx(
       'text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide border',
@@ -12,6 +12,7 @@ export function RiskBadge({ risk }: { risk: RiskLevel }) {
       risk === 'high' && 'bg-orange-50 text-orange-700 border-orange-200',
       risk === 'medium' && 'bg-amber-50 text-amber-700 border-amber-200',
       risk === 'low' && 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      risk === 'info' && 'bg-sky-50 text-sky-700 border-sky-200',
     )}>
       {risk}
     </span>
