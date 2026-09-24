@@ -214,6 +214,22 @@ def _extract_tool_findings(tool: str, result: Any) -> list[str]:
     return [f for f in out if f][:MAX_NEW_FINDINGS_PER_STEP]
 
 
+def _novel_findings(findings: list[str], target: str, apex: str,
+                    known: set[str], seen: set[tuple[str, str]]) -> list[str]:
+    """Drop findings the deterministic scan already reported (only when the tool
+    ran against the apex itself — the same text on a subdomain is a different
+    finding) and repeats of the same finding on the same target across steps."""
+    out = []
+    for f in findings:
+        if target == apex and f in known:
+            continue
+        if (target, f) in seen:
+            continue
+        seen.add((target, f))
+        out.append(f)
+    return out
+
+
 class _AgentState:
     def __init__(self, apex: str, extra_allowed: set[str]) -> None:
         self.apex = apex
@@ -308,9 +324,18 @@ def run(
     steps: list[dict] = []
     agent_findings: list[dict] = []
     started = time.time()
+    known_findings = {
+        f if isinstance(f, str) else str(f.get("finding") or "")
+        for f in (result.get("findings") or [])
+    }
+    seen_findings: set[tuple[str, str]] = set()
 
     def _record_step(tool: str, target: str, reasoning: str, tool_result: Any, duration: float) -> None:
-        new_findings = _extract_tool_findings(tool, tool_result)
+        new_findings = _novel_findings(
+            _extract_tool_findings(tool, tool_result),
+            (target or "").strip().lower(), domain.strip().lower(),
+            known_findings, seen_findings,
+        )
         step = {
             "n": len(steps) + 1,
             "tool": tool,
