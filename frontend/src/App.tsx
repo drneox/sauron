@@ -546,7 +546,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="max-w-7xl mx-auto px-4 pb-6 text-center text-xs text-dark-500">
-        Sauron ASM — © {new Date().getFullYear()} <a href="https://punkbot.ai" target="_blank" rel="noopener noreferrer" className="hover:text-dark-300 transition-colors duration-150">punkbot.ai</a>
+        Sauron ASM — © {new Date().getFullYear()} <a href="https://sauron.punkbot.ai" target="_blank" rel="noopener noreferrer" className="hover:text-dark-300 transition-colors duration-150">punkbot.ai</a>
       </footer>
     </div>
   )

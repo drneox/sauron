@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
+import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { AgentScanStatus, Finding, RiskLevel } from '../types/report'
 import { RiskBadge, SectionCard } from './ui'
@@ -64,6 +65,7 @@ export default function AgentScanView({ onBack, scanId }: Props) {
   const [domain, setDomain] = useState('')
   const [companyName, setCompanyName] = useState('')
   const [maxSteps, setMaxSteps] = useState('15')
+  const [mode, setMode] = useState<'deep' | 'recon'>('deep')
   const [formError, setFormError] = useState('')
   const [aiNotConfigured, setAiNotConfigured] = useState(false)
   const [launching, setLaunching] = useState(false)
@@ -101,7 +103,7 @@ export default function AgentScanView({ onBack, scanId }: Props) {
     setAiNotConfigured(false)
     setLaunching(true)
     try {
-      const payload: { domain: string; company_name?: string; max_steps?: number } = { domain: clean }
+      const payload: { domain: string; company_name?: string; max_steps?: number; mode: 'deep' | 'recon' } = { domain: clean, mode }
       if (companyName.trim()) payload.company_name = companyName.trim()
       if (maxSteps.trim() !== '') payload.max_steps = steps
       const { data } = await axios.post('/api/agent-scan', payload)
@@ -210,6 +212,36 @@ export default function AgentScanView({ onBack, scanId }: Props) {
 
         <form onSubmit={handleStart} className="card space-y-4">
           <div className="space-y-1">
+            <label className="text-xs font-semibold text-dark-500 uppercase tracking-wider">{t('agent.modeLabel')}</label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {(['deep', 'recon'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    setMode(m)
+                    // Follow the mode's default only while the field is untouched
+                    if (maxSteps === '15' || maxSteps === '25') setMaxSteps(m === 'recon' ? '25' : '15')
+                  }}
+                  className={clsx(
+                    'text-left rounded-xl border px-4 py-3 transition-colors duration-150',
+                    mode === m
+                      ? 'border-purple-400 bg-purple-50'
+                      : 'border-dark-700 bg-white hover:bg-dark-900',
+                  )}
+                >
+                  <div className={clsx('text-sm font-semibold', mode === m ? 'text-purple-700' : 'text-dark-200')}>
+                    {t(m === 'deep' ? 'agent.modeDeep' : 'agent.modeRecon')}
+                  </div>
+                  <div className="text-[11px] text-dark-500 mt-0.5 leading-snug">
+                    {t(m === 'deep' ? 'agent.modeDeepDesc' : 'agent.modeReconDesc')}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1">
             <label className="text-xs font-semibold text-dark-500 uppercase tracking-wider">{t('agent.targetDomain')}</label>
             <div className="relative">
               <Globe className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-dark-600 pointer-events-none" />
@@ -241,7 +273,7 @@ export default function AgentScanView({ onBack, scanId }: Props) {
             </div>
             <div className="space-y-1">
               <label className="text-xs font-semibold text-dark-500 uppercase tracking-wider">
-                {t('agent.maxSteps')} <span className="text-dark-600 normal-case font-normal">{t('agent.maxStepsHint')}</span>
+                {t('agent.maxSteps')} <span className="text-dark-600 normal-case font-normal">{t(mode === 'recon' ? 'agent.maxStepsHintRecon' : 'agent.maxStepsHint')}</span>
               </label>
               <input
                 type="number"

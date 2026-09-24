@@ -1,6 +1,6 @@
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical'
 
-export type ScanKind = 'full' | 'discover' | 'host' | 'module'
+export type ScanKind = 'full' | 'discover' | 'host' | 'module' | 'agent'
 
 export interface ScanStatus {
   scan_id: string

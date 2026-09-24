@@ -24,6 +24,7 @@ import unicodedata
 from typing import Any
 from urllib.parse import urlparse
 
+import dns.asyncresolver
 import httpx
 import tldextract
 from cryptography import x509
@@ -39,6 +40,7 @@ USER_AGENT = "Mozilla/5.0 (compatible; DumbAuditor/1.0)"
 
 CRT_SH_CAP = 40          # max base domains taken from crt.sh
 PERMUTATION_CAP = 30     # max generated permutation candidates
+STAGE_BUDGET_S = 25      # slow external sources (crt.sh, LLM) can't hold discovery past this
 LLM_BRAINSTORM_CAP = 25  # max domains requested from the LLM
 LLM_TIMEOUT = 45         # seconds for the single brainstorm call
 TOTAL_CAP = 50           # max candidates returned overall
@@ -80,7 +82,14 @@ def _brand_variants(company_name: str) -> list[str]:
         variants.add("".join(words))               # no spaces
         if len(words) > 1:
             variants.add("-".join(words))          # hyphenated
-            variants.add(words[0])                 # first word alone
+            # Distinctive words only: "grupo credicorp" must permute "credicorp",
+            # never the generic first word "grupo" (grupo.com is someone else's).
+            distinctive = [w for w in words if len(w) >= 3 and w not in _GENERIC_BRAND_WORDS]
+            if distinctive:
+                variants.add(distinctive[0])
+                variants.add("".join(distinctive))
+            else:
+                variants.add(words[0])
     return sorted(variants)
 
 
@@ -268,9 +277,14 @@ def _add_candidate(candidates: dict[str, dict], cand: dict) -> None:
 
 
 async def _resolves(domain: str, semaphore: asyncio.Semaphore) -> bool:
+    # gethostbyname has no timeout of its own: a name whose lookup gets dropped
+    # (some TLDs) blocked ~10s each, gating whole discovery batches. Bounded here.
     async with semaphore:
         try:
-            await asyncio.to_thread(socket.gethostbyname, domain)
+            resolver = dns.asyncresolver.Resolver()
+            resolver.timeout = 2
+            resolver.lifetime = 4
+            await resolver.resolve(domain, "A")
             return True
         except Exception:
             return False
@@ -367,62 +381,66 @@ async def run(company_name: str) -> list[dict[str, Any]]:
     company_name = company_name.strip()
     candidates: dict[str, dict] = {}
 
-    # Stage 1: certificate transparency by organization
-    try:
-        crt_cands = await _crt_sh_by_org(company_name)
-        for cand in crt_cands.values():
-            _add_candidate(candidates, cand)
-        logger.info(f"[discovery] crt.sh gave {len(crt_cands)} base domains for '{company_name}'")
-    except Exception as e:
-        logger.error(f"[discovery] crt.sh stage failed for '{company_name}': {e}")
+    # Stages 1-4 are independent network lookups: run them concurrently and merge
+    # in a fixed order (crt.sh, grep.app, permutations, LLM) so the result stays
+    # deterministic. Each stage is isolated so one outage never sinks the rest.
+    async def stage_crt() -> list[dict]:
+        try:
+            found = list((await asyncio.wait_for(_crt_sh_by_org(company_name), STAGE_BUDGET_S)).values())
+            logger.info(f"[discovery] crt.sh gave {len(found)} base domains for '{company_name}'")
+            return found
+        except Exception as e:
+            logger.error(f"[discovery] crt.sh stage failed for '{company_name}': {e or type(e).__name__}")
+            return []
 
-    # Stage 2: brand mentions in public code (grep.app)
-    try:
-        variants = _brand_variants(company_name)
-        grepapp_cands = await _grepapp_by_brand(company_name, variants)
-        for cand in grepapp_cands.values():
-            _add_candidate(candidates, cand)
-        logger.info(f"[discovery] grep.app gave {len(grepapp_cands)} base domains for '{company_name}'")
-    except Exception as e:
-        logger.error(f"[discovery] grep.app stage failed for '{company_name}': {e}")
+    async def stage_grepapp() -> list[dict]:
+        try:
+            found = list((await _grepapp_by_brand(company_name, _brand_variants(company_name))).values())
+            logger.info(f"[discovery] grep.app gave {len(found)} base domains for '{company_name}'")
+            return found
+        except Exception as e:
+            logger.error(f"[discovery] grep.app stage failed for '{company_name}': {e}")
+            return []
 
-    # Stage 3: brand permutations (only those that actually resolve)
-    try:
-        permutations = _permutation_domains(company_name)
-        resolving_perms = await _filter_resolving(permutations)
-        for domain in sorted(resolving_perms):
-            _add_candidate(candidates, {
+    async def stage_permutations() -> list[dict]:
+        try:
+            permutations = _permutation_domains(company_name)
+            resolving_perms = await _filter_resolving(permutations)
+            logger.info(f"[discovery] {len(resolving_perms)}/{len(permutations)} permutations resolve for '{company_name}'")
+            return [{
                 "domain": domain,
                 "source": "permutation",
                 "confidence": "low",
                 "evidence": f"Brand permutation of '{company_name}'; resolves via DNS",
-            })
-        logger.info(f"[discovery] {len(resolving_perms)}/{len(permutations)} permutations resolve for '{company_name}'")
-    except Exception as e:
-        logger.error(f"[discovery] permutation stage failed for '{company_name}': {e}")
+            } for domain in sorted(resolving_perms)]
+        except Exception as e:
+            logger.error(f"[discovery] permutation stage failed for '{company_name}': {e}")
+            return []
 
-    # Stage 4: LLM brainstorm (only with AI_API_KEY; only domains that resolve
-    # enter — verification later decides the final confidence)
-    try:
-        llm_cands = await llm_brainstorm_domains(company_name)
-        resolving_llm = await _filter_resolving([c["domain"] for c in llm_cands])
-        kept = 0
-        for c in llm_cands:
-            if c["domain"] not in resolving_llm:
-                continue
-            _add_candidate(candidates, {
+    async def stage_llm() -> list[dict]:
+        # Only with AI_API_KEY; only domains that resolve enter — verification
+        # later decides the final confidence.
+        try:
+            llm_cands = await asyncio.wait_for(llm_brainstorm_domains(company_name), STAGE_BUDGET_S)
+            resolving_llm = await _filter_resolving([c["domain"] for c in llm_cands])
+            kept = [{
                 "domain": c["domain"],
                 "source": "llm",
                 "source_detail": c["reason"],
                 "known": c["known"],
                 "confidence": "low",  # provisional — upgraded in verification
                 "evidence": f"LLM brainstorm: {c['reason']}",
-            })
-            kept += 1
-        if llm_cands:
-            logger.info(f"[discovery] LLM proposed {len(llm_cands)} domains, {kept} resolve for '{company_name}'")
-    except Exception as e:
-        logger.error(f"[discovery] LLM stage failed for '{company_name}': {e}")
+            } for c in llm_cands if c["domain"] in resolving_llm]
+            if llm_cands:
+                logger.info(f"[discovery] LLM proposed {len(llm_cands)} domains, {len(kept)} resolve for '{company_name}'")
+            return kept
+        except Exception as e:
+            logger.error(f"[discovery] LLM stage failed for '{company_name}': {e or type(e).__name__}")
+            return []
+
+    for group in await asyncio.gather(stage_crt(), stage_grepapp(), stage_permutations(), stage_llm()):
+        for cand in group:
+            _add_candidate(candidates, cand)
 
     # Cap total, crt.sh (high confidence) first
     ordered = sorted(candidates.values(), key=lambda c: _CONFIDENCE_ORDER.get(c["confidence"], 3))
@@ -507,10 +525,33 @@ async def run(company_name: str) -> list[dict[str, Any]]:
     return result
 
 
+_GENERIC_BRAND_WORDS = {
+    "grupo", "group", "holding", "holdings", "corp", "corporation", "corporacion",
+    "company", "compania", "the", "del", "los", "las", "and", "inc", "llc", "ltd",
+    "sac", "sas", "sa",
+}
+
+
+def _brand_tokens(company_name: str) -> list[str]:
+    """Distinctive words of a company name ('grupo credicorp' -> ['credicorp'])."""
+    words = re.findall(r"[a-z0-9]+", unicodedata.normalize("NFKD", company_name.lower())
+                       .encode("ascii", "ignore").decode())
+    return [w for w in words if len(w) >= 3 and w not in _GENERIC_BRAND_WORDS]
+
+
+def _app_matches_company(app: dict, tokens: list[str]) -> bool:
+    from modules import mobile_apps
+    return any(
+        mobile_apps._matches_brand(app.get("name") or "", t)
+        or mobile_apps._matches_brand(app.get("developer") or "", t)
+        for t in tokens
+    )
+
+
 async def discover_apps(company_name: str) -> list[dict[str, Any]]:
     """App-store discovery for a company name — runs alongside domain discovery
     so 'discover' means domains AND mobile apps. Reuses mobile_apps store
-    search + LLM classification; unrelated verdicts are dropped, result capped.
+    search; only apps carrying a distinctive word of the company are kept.
     Never raises: app discovery is informational at this stage."""
     from modules import mobile_apps
 
@@ -530,8 +571,11 @@ async def discover_apps(company_name: str) -> list[dict[str, Any]]:
         logger.warning(f"[discovery] Google Play app search failed for '{company_name}': {e}")
     if not candidates:
         return []
-    verdicts = await asyncio.to_thread(
-        mobile_apps._llm_classify_apps, company_name, company_name, candidates)
+    # No LLM here: on the configured model it costs ~3s per app (12 apps ~30s,
+    # 38 apps >90s), far too slow for an interactive modal — and it timed out
+    # anyway. Distinctive-word matching on name/developer is instant; scans
+    # (background) still run the LLM classification.
+    tokens = _brand_tokens(company_name) or [company_name]
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for app in candidates:
@@ -539,10 +583,9 @@ async def discover_apps(company_name: str) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
-        verdict = verdicts.get(key)
-        if verdict == "unrelated":
+        if not _app_matches_company(app, tokens):
             continue
-        app["llm_verdict"] = verdict
+        app["llm_verdict"] = None
         out.append(app)
     logger.info(f"[discovery] '{company_name}' -> {len(out)} app candidates")
     return out[:20]

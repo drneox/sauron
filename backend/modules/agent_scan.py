@@ -46,6 +46,7 @@ from modules.ai_summary import _build_compact_json, _chat_request
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_STEPS = 15
+RECON_MAX_STEPS = 25   # agent-only mode builds the whole picture itself
 MAX_STEPS_CAP = 30
 TOTAL_TIMEOUT_S = 600
 LLM_TIMEOUT = 90
@@ -166,11 +167,23 @@ SYSTEM_PROMPT = (
     "compacto de un escaneo determinista de superficie de ataque. Tu objetivo: investiga en "
     "profundidad los hallazgos más prometedores, verifica candidatos a secreto (mine_js → "
     "verify_secrets) y amplía la superficie si hay pistas (enumerate_subdomains, fuzz_paths). "
+    "NO repitas run_module sobre el dominio apex para módulos que ya aparecen en el resultado "
+    "determinista: ya tienes sus datos; úsalo sobre subdominios u otros dominios en scope. "
     "Solo puedes actuar sobre dominios dentro del scope indicado; cualquier otro target será "
     "rechazado. Cada vez que llames a una tool, rellena SIEMPRE su parámetro `reasoning` "
     "con 1-2 frases en español explicando por qué la ejecutas (se muestra en vivo al usuario). "
     "Cuando termines, llama a finish() con un resumen ejecutivo en español "
     "(markdown) orientado a un responsable de seguridad. No inventes hallazgos."
+)
+
+
+RECON_PROMPT = (
+    " MODO RECONOCIMIENTO: no existe escaneo determinista previo; construye tú el panorama. "
+    "Empieza con run_module sobre el dominio (dns, tech, headers, ssl, tls, waf, cors, cookies, robots), "
+    "luego enumerate_subdomains, mine_js → verify_secrets y fuzz_paths según las pistas, y "
+    "probe_sensitive_files si procede. Prioriza lo de mayor riesgo dentro del presupuesto. "
+    "No puedes ejecutar whois, email, puertos, breach ni blacklist: no los menciones como "
+    "hallazgos ni como cobertura, y aclara en el resumen que es un reconocimiento parcial."
 )
 
 
@@ -231,9 +244,10 @@ def _novel_findings(findings: list[str], target: str, apex: str,
 
 
 class _AgentState:
-    def __init__(self, apex: str, extra_allowed: set[str]) -> None:
+    def __init__(self, apex: str, extra_allowed: set[str], ran_modules: set[str] | None = None) -> None:
         self.apex = apex
         self.extra_allowed = extra_allowed
+        self.ran_modules = ran_modules or set()
         self.raw_secrets: dict | None = None
         self.finished = False
         self.summary: str = ""
@@ -252,6 +266,13 @@ class _AgentState:
             func = SAFE_MODULES.get(module)
             if func is None:
                 return {"status": "error", "error": f"Module '{module}' is not allowed. Allowed: {sorted(SAFE_MODULES)}"}
+            host = target.removeprefix("https://").removeprefix("http://").split("/")[0]
+            if host == self.apex.strip().lower() and module in self.ran_modules:
+                # Re-running it would return the same data the agent already has,
+                # burning a step and extra requests against the target.
+                return {"status": "skipped",
+                        "reason": f"'{module}' already ran on {host} in the deterministic scan — "
+                                  "its result is in your context. Investigate a subdomain or use another tool."}
             return func(target)
         if name == "enumerate_subdomains":
             result = subdomain_enum.run(target)
@@ -292,8 +313,10 @@ def run(
     max_steps: int = DEFAULT_MAX_STEPS,
     extra_allowed: set[str] | None = None,
     on_step: Callable[[dict], None] | None = None,
+    recon: bool = False,
 ) -> dict[str, Any]:
-    """Run the agent loop against a completed deterministic scan result.
+    """Run the agent loop against a completed deterministic scan result
+    (or, with recon=True, from scratch with no prior scan).
 
     Returns {"status": "ok"|"error"|"skipped", "steps": [...], "summary": str,
     "findings": [{"module": "agent", "finding", "risk"}], "assets_discovered": int,
@@ -308,17 +331,32 @@ def run(
     base_url = os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     model = os.getenv("AI_MODEL", "gpt-4o-mini")
 
-    state = _AgentState(domain, {d.lower() for d in (extra_allowed or set())})
+    ran_modules = {
+        name for name, m in (result.get("modules") or {}).items()
+        if isinstance(m, dict) and m.get("status") not in ("error", "skipped")
+    }
+    state = _AgentState(domain, {d.lower() for d in (extra_allowed or set())}, ran_modules)
     scope_desc = ", ".join(sorted({domain} | state.extra_allowed))
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": (
+    if recon:
+        user_msg = (
+            f"Dominio a investigar (apex): {domain}\n"
+            f"Dominios adicionales en scope: {scope_desc}\n"
+            f"Presupuesto: {max_steps} pasos como máximo. Termina con finish().\n"
+            "MODO RECONOCIMIENTO: no hay escaneo determinista previo, parte de cero."
+        )
+        system_msg = SYSTEM_PROMPT + RECON_PROMPT
+    else:
+        user_msg = (
             f"Dominio escaneado (apex): {domain}\n"
             f"Dominios adicionales en scope: {scope_desc}\n"
             f"Presupuesto: {max_steps} pasos como máximo. Termina con finish().\n"
             f"Resultado del escaneo determinista:\n{_build_compact_json(result)}"
-        )},
+        )
+        system_msg = SYSTEM_PROMPT
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
     ]
 
     steps: list[dict] = []

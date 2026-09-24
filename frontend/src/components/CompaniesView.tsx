@@ -3,7 +3,7 @@ import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { Company, CompanyDomain, DiscoveredDomain, DiscoveryResult } from '../types/report'
-import { Bot, CalendarClock, Check, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
+import { Bot, CalendarClock, Check, ChevronDown, ExternalLink, Play, Plus, Radar, Search, Smartphone, Trash2, X } from 'lucide-react'
 
 interface Props {
   readOnly?: boolean
@@ -279,6 +279,7 @@ function DiscoveryPanel({
   const [result, setResult] = useState<DiscoveryResult | null>(null)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [openSection, setOpenSection] = useState<'domains' | 'apps'>('domains')
   const [adding, setAdding] = useState(false)
   const [addErrors, setAddErrors] = useState<Record<string, string>>({})
   const [duplicates, setDuplicates] = useState<Set<string>>(new Set())
@@ -374,10 +375,15 @@ function DiscoveryPanel({
 
   const candidates = result?.candidates ?? []
   const discoveredApps = result?.apps ?? []
+  const hasContent = candidates.length > 0 || discoveredApps.length > 0
+  // Exclusive accordion: only one section open at a time, the open one takes the
+  // remaining modal height (no fixed heights, so the modal can never overflow).
+  const activeSection: 'domains' | 'apps' =
+    candidates.length === 0 ? 'apps' : discoveredApps.length === 0 ? 'domains' : openSection
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark-50/40 backdrop-blur-sm p-4">
-      <div className="card w-full max-w-2xl max-h-[80vh] flex flex-col shadow-lg">
+      <div className={clsx('card w-full max-w-2xl max-h-[85vh] flex flex-col shadow-lg', phase === 'done' && hasContent && 'h-[min(85vh,40rem)]')}>
         <div className="flex items-center gap-3 mb-3">
           <h3 className="text-base font-semibold tracking-tight text-dark-100 flex-1">
             {t('companies.discovery.title', { name: company.name })}
@@ -424,9 +430,29 @@ function DiscoveryPanel({
           </div>
         )}
 
-        {phase === 'done' && candidates.length > 0 && (
+        {phase === 'done' && hasContent && (
           <>
-            <div className="overflow-y-auto flex-1 -mx-1 px-1">
+            <div className="flex-1 min-h-0 flex flex-col gap-2">
+              {candidates.length > 0 && (
+                <div className={clsx('flex flex-col min-h-0', activeSection === 'domains' ? 'flex-1' : 'shrink-0')}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenSection('domains')}
+                    className="w-full text-xs font-semibold text-dark-500 uppercase tracking-wider flex items-center gap-1.5 py-1.5 hover:text-dark-300 transition-colors duration-150"
+                  >
+                    <Radar className="w-3.5 h-3.5 text-cyber-600" />
+                    <span className="flex-1 text-left">
+                      {t('companies.discovery.domainsTitle', { count: candidates.length })}
+                      {selected.size > 0 && (
+                        <span className="ml-2 normal-case text-cyber-700 font-medium">
+                          {t('companies.discovery.selectedCount', { count: selected.size })}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronDown className={clsx('w-3.5 h-3.5 transition-transform duration-150', activeSection === 'domains' && 'rotate-180')} />
+                  </button>
+                  {activeSection === 'domains' && (
+                    <div className="overflow-y-auto flex-1 min-h-0 -mx-1 px-1">
               {candidates.map((c) => {
                 const alreadyAdded = existing.has(c.domain.toLowerCase()) || duplicates.has(c.domain)
                 return (
@@ -469,32 +495,24 @@ function DiscoveryPanel({
                   </div>
                 )
               })}
-            </div>
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={onClose}
-                disabled={adding}
-                className="btn-secondary"
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                onClick={handleAddSelected}
-                disabled={adding || selected.size === 0}
-                className="text-xs px-4 py-1.5 bg-cyber-600 hover:bg-cyber-700 disabled:opacity-50 text-white font-semibold rounded-lg transition-colors duration-150"
-              >
-                {adding ? t('companies.adding') : t('companies.discovery.addSelected', { count: selected.size })}
-              </button>
-            </div>
-          </>
-        )}
-        {phase === 'done' && discoveredApps.length > 0 && (
-          <div className="mt-4">
-            <h4 className="text-xs font-semibold text-dark-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <Smartphone className="w-3.5 h-3.5 text-cyber-600" />
-              {t('companies.discovery.appsTitle', { count: discoveredApps.length })}
-            </h4>
-            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                    </div>
+                  )}
+                </div>
+              )}
+              {discoveredApps.length > 0 && (
+                <div className={clsx('flex flex-col min-h-0', activeSection === 'apps' ? 'flex-1' : 'shrink-0', candidates.length > 0 && 'border-t border-dark-800 pt-1')}>
+                  <button
+                    type="button"
+                    onClick={() => setOpenSection('apps')}
+                    className="w-full text-xs font-semibold text-dark-500 uppercase tracking-wider flex items-center gap-1.5 py-1.5 hover:text-dark-300 transition-colors duration-150"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-cyber-600" />
+                    <span className="flex-1 text-left">{t('companies.discovery.appsTitle', { count: discoveredApps.length })}</span>
+                    <ChevronDown className={clsx('w-3.5 h-3.5 transition-transform duration-150', activeSection === 'apps' && 'rotate-180')} />
+                  </button>
+                  {activeSection === 'apps' && (
+                    <>
+                      <div className="space-y-1.5 overflow-y-auto flex-1 min-h-0 mt-1">
               {discoveredApps.map((a, i) => (
                 <div key={`${a.store}:${a.name}:${i}`} className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-dark-800 text-sm">
                   <span className={clsx(
@@ -506,7 +524,7 @@ function DiscoveryPanel({
                     {a.store === 'app_store' ? 'App Store' : 'Google Play'}
                   </span>
                   <span className="text-dark-100 font-medium truncate flex-1">{a.name}</span>
-                  {a.version && <span className="text-xs text-dark-500 font-mono shrink-0">v{a.version}</span>}
+                  {a.version && /^\d/.test(a.version) && <span className="text-xs text-dark-500 font-mono shrink-0">v{a.version}</span>}
                   {a.llm_verdict && (
                     <span className={clsx(
                       'text-[10px] px-1.5 py-0.5 rounded-full font-semibold border shrink-0',
@@ -524,9 +542,32 @@ function DiscoveryPanel({
                   )}
                 </div>
               ))}
+                      </div>
+                      <p className="text-[11px] text-dark-600 mt-1.5 shrink-0">{t('companies.discovery.appsHint')}</p>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
-            <p className="text-[11px] text-dark-600 mt-1.5">{t('companies.discovery.appsHint')}</p>
-          </div>
+            {candidates.length > 0 && (
+              <div className="shrink-0 flex justify-end gap-2 mt-3 pt-3 border-t border-dark-800">
+              <button
+                onClick={onClose}
+                disabled={adding}
+                className="btn-secondary"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                onClick={handleAddSelected}
+                disabled={adding || selected.size === 0}
+                className="text-xs px-4 py-1.5 bg-cyber-600 hover:bg-cyber-700 disabled:opacity-50 text-white font-semibold rounded-lg transition-colors duration-150"
+              >
+                {adding ? t('companies.adding') : t('companies.discovery.addSelected', { count: selected.size })}
+              </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -972,7 +1013,8 @@ export default function CompaniesView({ readOnly = false, isAdmin = false, onSca
   const load = async () => {
     try {
       const { data } = await axios.get('/api/companies')
-      setCompanies([...data].sort((a, b) => a.name.localeCompare(b.name)))
+      // Backend order is newest-first (created_at desc): keep it, so a just-added company lands on top.
+      setCompanies(data)
       setError('')
     } catch (err) {
       setError(errorMessage(err, t('companies.loadError')))

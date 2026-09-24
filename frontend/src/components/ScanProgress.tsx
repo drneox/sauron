@@ -257,6 +257,11 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
               {t('scan.moduleBadge')}
             </span>
           )}
+          {kind === 'agent' && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border bg-purple-50 border-purple-200 text-purple-700">
+              {t('scan.agentBadge')}
+            </span>
+          )}
           <span className="ml-auto text-xs text-dark-500 font-mono tabular-nums">{fmtElapsed(elapsed)}</span>
         </div>
 
