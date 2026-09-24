@@ -24,6 +24,14 @@ def _get_certificate(hostname: str, port: int = 443) -> dict:
     return {"cert": cert, "cipher": cipher, "version": version}
 
 
+def _serves_tls(hostname: str) -> bool:
+    try:
+        _get_certificate(hostname)
+        return True
+    except Exception:
+        return False
+
+
 def _check_deprecated_protocols(hostname: str) -> list[str]:
     deprecated = []
     for protocol, name in [
@@ -131,11 +139,28 @@ def run(domain: str, port: int = 443) -> dict[str, Any]:
             result["findings"].append(f"Weak cipher suite detected: {result['cipher']}")
             result["risk"] = "high"
 
-    except ssl.SSLError as e:
+    except ssl.SSLCertVerificationError as e:
+        # The server answered with a certificate that clients reject (hostname
+        # mismatch, untrusted chain, ...): a real, user-visible certificate defect.
         result["status"] = "ssl_error"
         result["error"] = str(e)
-        result["risk"] = "critical"
-        result["findings"].append("SSL handshake failed — certificate or configuration error")
+        result["risk"] = "high"
+        result["findings"].append(
+            f"SSL certificate validation failed: {e.verify_message or e.reason or 'untrusted certificate'}"
+        )
+    except ssl.SSLError as e:
+        # The server refused the handshake itself (handshake_failure / internal
+        # error alert): typically a CDN with no certificate configured for this
+        # hostname — HTTPS isn't served here, which is not a broken certificate.
+        result["status"] = "ssl_error"
+        result["error"] = str(e)
+        result["risk"] = "medium"
+        note = ""
+        if not domain.startswith("www.") and _serves_tls(f"www.{domain}"):
+            note = f" (www.{domain} does serve HTTPS)"
+        result["findings"].append(
+            f"TLS handshake refused by the server — HTTPS is not served on this hostname{note}"
+        )
     except ConnectionRefusedError:
         result["status"] = "no_ssl"
         result["has_ssl"] = False

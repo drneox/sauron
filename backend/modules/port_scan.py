@@ -7,6 +7,7 @@ unauthenticated-service probes by this module — the result contract is the
 same regardless of engine.
 """
 import asyncio
+import re
 import socket
 import concurrent.futures
 import logging
@@ -230,6 +231,20 @@ def run(domain: str) -> dict[str, Any]:
             risk = "critical"
         elif port_num == 3389:
             findings.append("RDP (3389) exposed to internet — primary ransomware entry point")
+        elif port_num == 22:
+            # Remote administration reachable from the internet: a standard ASM
+            # hardening finding (brute-force / credential-stuffing surface).
+            # Kept out of RISKY_PORTS so it doesn't trip the "2+ risky ports => high" rule.
+            banner = (p.get("banner") or "").strip()[:60]
+            detail = f" — {banner}" if banner else ""
+            m = re.search(r"OpenSSH_(\d+)\.(\d+)", banner)
+            if m and (int(m.group(1)), int(m.group(2))) < (7, 4):
+                detail += " (outdated OpenSSH)"
+            findings.append(
+                f"SSH (22) exposed to the internet{detail} — restrict by IP/VPN and enforce key-only auth"
+            )
+            if risk == "low":
+                risk = "medium"
         elif port_num == 8888 and p.get("unauthenticated"):
             findings.append("Jupyter Notebook (8888) open without authentication — allows arbitrary code execution")
             risk = "critical"

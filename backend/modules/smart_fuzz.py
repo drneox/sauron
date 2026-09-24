@@ -364,18 +364,21 @@ async def _probe_path(
             sev = _base_severity(path)
             if sev in ("critical", "high", "medium"):
                 note = "auth required" if code == 401 else "access forbidden — likely exists"
-                return _make_hit(path, url, code, body_size,
-                                 "low" if sev == "medium" else "medium",
-                                 directed, f"HTTP {code} ({note})")
+                # Access is denied: nothing is exposed, so this stays inventory
+                # ("low"), never a finding. _hash is internal, stripped in
+                # _run_async after the same-run wall check.
+                hit = _make_hit(path, url, code, body_size, "low", directed, f"HTTP {code} ({note})")
+                hit["_hash"] = body_hash
+                return hit
             return None
 
         return None
 
 
 def _make_hit(path, url, status, size, severity, directed, evidence) -> dict:
-    # Redirects stay "low" even when LLM-directed: a bump would surface them as
-    # MEDIUM findings although nothing proves the path exists.
-    if directed and status not in (301, 302, 303, 307, 308):
+    # Redirects and 401/403 stay "low" even when LLM-directed: a bump would surface
+    # them as MEDIUM findings although nothing proves the path is exposed.
+    if directed and status not in (301, 302, 303, 307, 308, 401, 403):
         severity = _bump(severity)
     return {
         "path": path,
@@ -452,6 +455,21 @@ async def _run_async(
                     )
                     break
 
+    # Same-run wall check: several sensitive-looking paths answering 401/403 with a
+    # byte-identical body is a WAF/catch-all blocking by pattern (the random-path
+    # baseline can't see it — it never probes sensitive-looking names).
+    hash_counts: dict[str, int] = {}
+    for f in found:
+        if f.get("_hash"):
+            hash_counts[f["_hash"]] = hash_counts.get(f["_hash"], 0) + 1
+    wall_hashes = {h for h, c in hash_counts.items() if c >= 3}
+    suppressed_count = sum(1 for f in found if f.get("_hash") in wall_hashes)
+    if suppressed_count:
+        logger.info(f"[smart_fuzz] {domain}: suppressing {suppressed_count} 401/403 hit(s) sharing an identical body")
+        found = [f for f in found if f.get("_hash") not in wall_hashes]
+    for f in found:
+        f.pop("_hash", None)
+
     _conf_directed = {True: 0, False: 1}
     found.sort(key=lambda x: (-SEVERITY_ORDER.get(x["severity"], 0), _conf_directed[x["directed"]]))
 
@@ -465,6 +483,11 @@ async def _run_async(
         findings.append(
             "[INFO] WAF blocking fuzzing (block page or uniform 403 wall) — "
             "path discovery cut short; results are a lower bound"
+        )
+    if suppressed_count:
+        findings.append(
+            f"[INFO] Suppressed {suppressed_count} sensitive-path 401/403 hit(s) sharing an "
+            "identical response body — WAF/catch-all wall, not confirmed paths"
         )
     for f in found:
         if f["severity"] in ("critical", "high", "medium"):

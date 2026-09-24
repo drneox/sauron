@@ -113,6 +113,11 @@ export default function ScanHistory({ onViewReport, onScanStarted, readOnly = fa
                         {t('history.moduleBadge')}
                       </span>
                     )}
+                    {s.kind === 'agent' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold border bg-purple-50 text-purple-700 border-purple-200 inline-flex items-center gap-1 font-sans">
+                        {t('history.agentBadge')}
+                      </span>
+                    )}
                   </div>
                   <div className="text-dark-500 text-xs">
                     {new Date(s.started_at).toLocaleString()} · {(STATUS_KEYS as readonly string[]).includes(s.status) ? t(`history.status.${s.status}`) : s.status}

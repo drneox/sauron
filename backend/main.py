@@ -243,6 +243,16 @@ class AgentScanRequest(BaseModel):
     domain: str
     company_name: str | None = None
     max_steps: int | None = None
+    # "deep": full deterministic scan, then the agent (default).
+    # "recon": agent only, from scratch (kind="agent": no score, no rating).
+    mode: str = "deep"
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        if v not in ("deep", "recon"):
+            raise ValueError("mode must be 'deep' or 'recon'")
+        return v
 
     @field_validator("domain")
     @classmethod
@@ -894,6 +904,8 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         ("secret_verification", _secret_verification_run),   # needs js_secrets
         ("smart_fuzz",          _smart_fuzz_run),             # needs tech + js_secrets
     ]
+    if kind == "agent":
+        modules, tier1_modules = [], []   # agent-only recon: no deterministic pipeline
     all_modules = modules + tier1_modules
 
     module_allowlist = SCANS[scan_id].get("modules_allowlist") or []
@@ -1013,6 +1025,9 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     if kind == "discover":
         scorecard = {"score": None, "grade": None, "overall_risk": "low",
                      "note": "discovery pass — inventory only, no evaluation"}
+    elif kind == "agent":
+        scorecard = {"score": None, "grade": None, "overall_risk": "low",
+                     "note": "agent-only reconnaissance — no evaluation, no domain rating"}
     elif kind == "module":
         # Module scans are partial by definition: no score/grade (they would
         # not be comparable to a full evaluation), but the worst module risk
@@ -1062,10 +1077,13 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
                 agent_scan.run,
                 domain,
                 result,
+                # The agent_default_steps setting is tuned for deep mode (the agent
+                # builds on full scan results); recon starts from nothing and needs more.
                 max_steps=SCANS[scan_id].get("max_steps")
-                    or (settings or {}).get("agent_default_steps")
-                    or agent_scan.DEFAULT_MAX_STEPS,
+                    or (agent_scan.RECON_MAX_STEPS if kind == "agent"
+                        else (settings or {}).get("agent_default_steps") or agent_scan.DEFAULT_MAX_STEPS),
                 extra_allowed=set(SCANS[scan_id].get("extra_allowed") or []),
+                recon=(kind == "agent"),
                 on_step=lambda step: SCANS[scan_id]["agent_steps"].append(step),
             )
         except Exception as e:
@@ -1659,7 +1677,12 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
     subdomain enumeration); within that, fanout_scope narrows to the hosts
     actually worth a fresh deep look:
       - "new":            hosts this scan discovered for the first time
-                           (Asset.first_seen_scan_id == this scan)
+                           (Asset.first_seen_scan_id == this scan) PLUS any alive
+                           host that has never had a deep host scan. The second
+                           part matters because assets are upserted incrementally:
+                           an interrupted/restarted scan marks them "first seen"
+                           before the completed scan runs, which would otherwise
+                           leave them without a host scan forever.
       - "changed":         hosts whose Asset metadata changed this scan
                            (new IP, new open port, new http_status…) — the
                            same AssetHistory rows that power the company
@@ -1682,6 +1705,7 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
         s["subdomain"] for s in entries
         if isinstance(s, dict) and s.get("status") == "active" and s.get("subdomain")
     }
+    alive.discard(dom.domain)
     if not alive:
         return
 
@@ -1694,18 +1718,34 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
         if scope in ("new", "new_or_changed"):
             new_rows = await Asset.filter(domain_id=dom.id, type="subdomain", first_seen_scan_id=scan_id)
             new_set = {a.value for a in new_rows}
+            deep_scanned = set(await Scan.filter(
+                domain_id=dom.id, kind="host", status__in=["completed", "queued", "running"],
+            ).values_list("scan_target", flat=True))
+            new_set |= alive - deep_scanned
         if scope in ("changed", "new_or_changed"):
             history_rows = await AssetHistory.filter(scan_id=scan_id).select_related("asset")
             changed_set = {h.asset.value for h in history_rows if h.asset.type == "subdomain"}
         targets = (new_set | changed_set) & alive
 
     if not targets:
+        logger.info(f"[{scan_id}] Fan-out: no eligible hosts for {dom.domain} (scope={scope}, {len(alive)} alive)")
         return
 
     cap = settings.get("fanout_max_targets") or DEFAULT_FANOUT_MAX
     in_flight = {s.get("domain") for s in SCANS.values() if s.get("status") in ("queued", "running")}
+    # The cap must not starve anyone: hosts that never had a deep scan go first,
+    # then the least recently scanned. (Alphabetical order would re-pick the same
+    # first N hosts on every full scan and never reach the rest.)
+    last_deep: dict[str, datetime] = {}
+    for target, done_at in await Scan.filter(
+        domain_id=dom.id, kind="host", status="completed",
+    ).values_list("scan_target", "completed_at"):
+        if done_at and (target not in last_deep or done_at > last_deep[target]):
+            last_deep[target] = done_at
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(targets, key=lambda h: (h in last_deep, last_deep.get(h, oldest), h))
     queued = 0
-    for host in sorted(targets):
+    for host in ordered:
         if queued >= cap:
             break
         if host in in_flight:
@@ -1715,9 +1755,10 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
         await scan_queue.enqueue(host_scan_id, host, dom.id)
         queued += 1
     if queued:
+        left = len([h for h in ordered if h not in in_flight]) - queued
         logger.info(
             f"[{scan_id}] Fan-out: queued {queued} host scan(s) for {dom.domain} "
-            f"(scope={scope}, {len(targets)} eligible, cap={cap})"
+            f"(scope={scope}, {len(targets)} eligible, cap={cap}, {max(left, 0)} left for the next scan)"
         )
 
 
@@ -1732,7 +1773,7 @@ async def _persist_completed_scan(scan_id: str, domain: str, domain_id: int | No
     # full/discover scans against the previous full/discover scan — either way
     # a host/module scan never becomes the domain's "latest scan".
     kind = result.get("kind", "full")
-    if kind in ("host", "module"):
+    if kind in ("host", "module", "agent"):
         prev = await Scan.filter(domain_id=dom.id, status="completed",
                                  kind=kind, scan_target=domain) \
             .order_by("-completed_at", "-started_at").first()
@@ -2222,6 +2263,7 @@ async def start_agent_scan(request: AgentScanRequest, req: Request, user=Depends
         request.domain, domain_id,
         agent_mode=True, max_steps=request.max_steps, extra_allowed=extra_allowed,
         created_by=user_id_of(user),
+        kind="agent" if request.mode == "recon" else "full",
     )
     await _insert_queued_scan(scan_id, request.domain, domain_id)
     await scan_queue.enqueue(scan_id, request.domain, domain_id)
@@ -2528,8 +2570,11 @@ async def download_pdf(scan_id: str):
 # ── Domain discovery (company name -> candidate domains) ─────────────────────
 async def _run_discovery(discovery_id: str, company_name: str) -> None:
     try:
-        candidates = await domain_discovery.run(company_name)
-        apps = await domain_discovery.discover_apps(company_name)
+        # Independent lookups: run domain and app discovery at the same time.
+        candidates, apps = await asyncio.gather(
+            domain_discovery.run(company_name),
+            domain_discovery.discover_apps(company_name),
+        )
         DISCOVERIES[discovery_id].update(
             {
                 "status": "completed",

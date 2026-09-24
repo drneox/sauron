@@ -11,6 +11,7 @@ Optional layers:
   - LLM verdict: with AI_API_KEY set, a single batch call classifies every
     candidate as official|unrelated|suspicious (llm_verdict field).
 """
+import concurrent.futures
 import json
 import logging
 import os
@@ -135,11 +136,19 @@ def _search_google_play(brand: str, locale: dict[str, str] | None = None, ai_ava
     # go first so the cap never cuts the most relevant result.
     html_ids = [i for i in _play_search_html_ids(brand).keys()]
     app_ids = html_ids + [i for i in scraper_ids if i not in html_ids]
-    for app_id in app_ids[:GPLAY_DETAIL_LIMIT]:
+    def _fetch_detail(app_id: str) -> dict | None:
         try:
-            detail = gplay_app(app_id, **loc)
+            return gplay_app(app_id, **loc)
         except Exception as e:
             logger.warning(f"[mobile_apps] Google Play detail fetch failed for {app_id}: {e}")
+            return None
+
+    # One HTTP round-trip per app: fetching them one by one took ~25s for a
+    # full result page. Parallel, order preserved (ranking decides the cap).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        details = list(pool.map(_fetch_detail, app_ids[:GPLAY_DETAIL_LIMIT]))
+    for detail in details:
+        if not detail:
             continue
         developer = detail.get("developer") or ""
         updated = detail.get("updated")
