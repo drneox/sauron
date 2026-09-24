@@ -121,6 +121,25 @@ def make_async_client(proxy: str | None | object = _UNSET, timeout: float = 10, 
     )
 
 
+def is_same_path_redirect(request_url: str, location: str) -> bool:
+    """True when a redirect only normalizes the URL (other host, http->https,
+    trailing slash) and lands on the very same path.
+
+    Such a redirect says nothing about the probed path existing: a vanity or
+    apex domain that 301s everything to its canonical host answers every
+    probe this way, real path or not.
+    """
+    if not location:
+        return False
+    try:
+        target = urlparse(urljoin(request_url, location.strip()))
+        probed = urlparse(request_url)
+    except ValueError:
+        return False
+    return (target.path.rstrip("/") == probed.path.rstrip("/")
+            and target.query == probed.query)
+
+
 def _read_limited(resp: httpx.Response, max_bytes: int) -> bytes:
     """Read a streamed response body, truncating at max_bytes."""
     chunks: list[bytes] = []

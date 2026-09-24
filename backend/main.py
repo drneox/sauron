@@ -420,12 +420,24 @@ def _mobile_apps_finding_category(finding) -> str:
     return "exposure" if "impersonation" in str(finding).lower() else "info"
 
 
+def _is_unversioned_tech_disclosure(s: str) -> bool:
+    # "Server: cloudflare reveals server technology" is fingerprinting noise;
+    # only a disclosed exact version (nginx/1.14.1) is a real hardening gap.
+    return "reveals server technology" in s and not re.search(r"\d+\.\d+\.\d+", s)
+
+
+def _headers_finding_category(finding) -> str:
+    return "info" if _is_unversioned_tech_disclosure(str(finding).lower()) else "misconfiguration"
+
+
 def _subdomain_eval_finding_category(finding) -> str:
     s = str(finding).lower()
+    if (s.startswith("chained evaluation:") or "evaluated as" in s
+            or "no apim-type candidate" in s or "js bundle exposes" in s
+            or _is_unversioned_tech_disclosure(s)):
+        return "info"            # summaries / notices / recon notes, not defects
     if "secret" in s:
         return "vulnerability"   # forwarded js_secrets / secret-verification hits
-    if "evaluated as" in s:
-        return "info"            # "new subdomain evaluated as X risk" notice
     return "misconfiguration"    # forwarded headers/tech findings from the live host
 
 
@@ -433,6 +445,22 @@ def _whois_finding_category(finding) -> str:
     # Domain expiration is a real operational/hijack risk (an expired domain
     # can be re-registered by an attacker), not neutral registration inventory.
     return "misconfiguration" if "expires in" in str(finding).lower() else "info"
+
+
+def _email_finding_category(finding) -> str:
+    # Only SPF/DMARC gaps are real email-authentication defects. DKIM absence
+    # at well-known selectors is unverifiable (selectors aren't enumerable),
+    # provider fingerprinting is inventory, and a failed DNS lookup is
+    # inconclusive — none of those may count toward score or grade caps.
+    s = str(finding)
+    if "inconclusive" in s:
+        return "info"
+    return "misconfiguration" if ("SPF" in s or "DMARC" in s) else "info"
+
+
+def _blacklist_finding_category(finding) -> str:
+    # A refused DNSBL query is an inconclusive check, not a listing.
+    return "info" if "inconclusive" in str(finding) else "vulnerability"
 
 
 def _wayback_finding_category(finding) -> str:
@@ -463,6 +491,9 @@ FINDING_CATEGORY_RULES = {
     "subdomain_eval": _subdomain_eval_finding_category,
     "breach": _breach_finding_category,
     "wayback": _wayback_finding_category,
+    "email": _email_finding_category,
+    "headers": _headers_finding_category,
+    "blacklist": _blacklist_finding_category,
 }
 
 # Unknown modules default to info: an unrecognized module must never tank the

@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from modules.common import afetch, make_async_client
+from modules.common import afetch, is_same_path_redirect, make_async_client
 from modules.exposed_files import (
     SEVERITY_ORDER,
     _body_hash,
@@ -325,6 +325,11 @@ async def _probe_path(
             # Catch-all redirects to the homepage are noise, not a hit.
             if norm_location in ("", "/", base_url.rstrip("/")):
                 return None
+            # Canonical-host / http->https / trailing-slash redirect to the very
+            # same path: the site's default behavior, not evidence of this path.
+            if is_same_path_redirect(url, location):
+                stats["wall_redirect"] += 1
+                return None
             # Redirect wall: random non-existent paths in the baseline bounced
             # to this same target (e.g. every unauthenticated path -> /login).
             # A probe landing on the same target proves nothing about that
@@ -368,7 +373,9 @@ async def _probe_path(
 
 
 def _make_hit(path, url, status, size, severity, directed, evidence) -> dict:
-    if directed:
+    # Redirects stay "low" even when LLM-directed: a bump would surface them as
+    # MEDIUM findings although nothing proves the path exists.
+    if directed and status not in (301, 302, 303, 307, 308):
         severity = _bump(severity)
     return {
         "path": path,
