@@ -2,6 +2,7 @@ import { RiskLevel } from '../types/report'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Check, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import axios from 'axios'
 
 export function RiskBadge({ risk }: { risk: RiskLevel }) {
   return (
@@ -76,6 +77,23 @@ export function Pager({ page, total, onPage, pageSize = PAGE_SIZE }: {
       </button>
     </div>
   )
+}
+
+// Plain `<a href="/api/...">` links can't carry the Bearer token the backend
+// requires (AUTH_ENABLED=true rejects them with 401, which browsers surface
+// as a generic "file not available" download failure) — so authenticated
+// exports go through axios (its request interceptor attaches the token) and
+// save the response blob manually instead of relying on browser navigation.
+export async function downloadFromApi(url: string, filename: string): Promise<void> {
+  const res = await axios.get(url, { responseType: 'blob' })
+  const blobUrl = URL.createObjectURL(res.data)
+  const a = document.createElement('a')
+  a.href = blobUrl
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(blobUrl)
 }
 
 export function downloadCsv(

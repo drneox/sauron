@@ -27,6 +27,7 @@ import {
   td,
 } from './assetTable'
 import { HostTable, HostFilter, TaggedHost } from './hostTable'
+import { downloadFromApi } from './ui'
 import RatingTrendCard from './RatingTrend'
 import DashboardAnalytics from './DashboardAnalytics'
 import PortfolioSection from './PortfolioSection'
@@ -871,6 +872,14 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
           </button>
         )}
         <button
+          onClick={() => downloadFromApi('/api/companies/assets/export/all?format=csv', 'all_assets.csv')}
+          className="btn-secondary"
+          title={t('dashboard.exportAllCsv')}
+        >
+          <Download className="w-3.5 h-3.5" />
+          {t('dashboard.exportAllCsv')}
+        </button>
+        <button
           onClick={toggleCompareMode}
           className={clsx(
             'text-xs px-3 py-1.5 border rounded-lg transition-colors duration-150 inline-flex items-center gap-1.5',
@@ -884,22 +893,20 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
         </button>
         {activeCompany && (
           <>
-            <a
-              href={`/api/companies/${activeCompany.id}/assets/export?format=csv`}
-              download
+            <button
+              onClick={() => downloadFromApi(`/api/companies/${activeCompany.id}/assets/export?format=csv`, `${activeCompany.name}_assets.csv`)}
               className="btn-secondary"
             >
               <Download className="w-3.5 h-3.5" />
               CSV
-            </a>
-            <a
-              href={`/api/companies/${activeCompany.id}/assets/export?format=json`}
-              download
+            </button>
+            <button
+              onClick={() => downloadFromApi(`/api/companies/${activeCompany.id}/assets/export?format=json`, `${activeCompany.name}_assets.json`)}
               className="btn-secondary"
             >
               <Download className="w-3.5 h-3.5" />
               JSON
-            </a>
+            </button>
           </>
         )}
         <button

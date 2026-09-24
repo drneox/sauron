@@ -3824,6 +3824,76 @@ def _assets_csv_rows(payload: dict) -> list[dict]:
     return rows
 
 
+SUMMARY_CSV_COLUMNS = [
+    "company_id", "company_name", "domains", "subdomains", "ips",
+    "endpoints", "technologies", "admin_panels", "exposed_files",
+    "open_ports", "apps", "neighbors", "new_last_cycle",
+]
+
+
+@app.get("/api/companies/assets/export/summary")
+async def export_all_companies_assets_summary(format: str = Query(default="csv")):
+    if format not in ("csv", "json"):
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'json'")
+    companies = await Company.all().order_by("name")
+    rows = []
+    for company in companies:
+        payload = await _build_company_assets(company)
+        summary = payload["summary"]
+        rows.append({
+            "company_id": company.id,
+            "company_name": company.name,
+            **{k: summary[k] for k in SUMMARY_CSV_COLUMNS if k in summary},
+        })
+    if format == "json":
+        return Response(
+            content=json.dumps(rows, ensure_ascii=False, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="assets_summary_by_company.json"'},
+        )
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=SUMMARY_CSV_COLUMNS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="assets_summary_by_company.csv"'},
+    )
+
+
+ALL_ASSETS_CSV_COLUMNS = ["company_id", "company_name", *ASSETS_CSV_COLUMNS]
+
+
+@app.get("/api/companies/assets/export/all")
+async def export_all_companies_assets(format: str = Query(default="csv")):
+    if format not in ("csv", "json"):
+        raise HTTPException(status_code=400, detail="format must be 'csv' or 'json'")
+    companies = await Company.all().order_by("name")
+    rows = []
+    for company in companies:
+        payload = await _build_company_assets(company)
+        for row in _assets_csv_rows(payload):
+            rows.append({"company_id": company.id, "company_name": company.name, **row})
+    if format == "json":
+        return Response(
+            content=json.dumps(rows, ensure_ascii=False, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="all_assets.json"'},
+        )
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=ALL_ASSETS_CSV_COLUMNS)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="all_assets.csv"'},
+    )
+
+
 @app.get("/api/companies/{company_id}/assets/export")
 async def export_company_assets(company_id: int, format: str = Query(default="csv")):
     company = await Company.get_or_none(id=company_id)
