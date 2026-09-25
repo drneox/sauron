@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,7 +54,10 @@ def _play_locale(domain: str) -> dict[str, str]:
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+    # Fold accents first: stores return "Banco de Crédito" and "Banco de Credito"
+    # for the same developer, and dropping "é" as punctuation made them differ.
+    folded = "".join(c for c in unicodedata.normalize("NFKD", text or "") if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", folded.lower())
 
 
 def _matches_brand(developer: str, brand: str) -> bool:
@@ -374,19 +378,30 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
         errors.append(f"google_play: {e}")
 
     # Confirmed official developers (per-domain setting): look up their catalog
-    # directly and merge into the official list.
-    seen_apps = {(a["store"], a["name"]) for a in result["apps"]}
+    # directly and merge into the official list. A developer confirmed on one
+    # store is searched on the OTHER store too: companies publish under the same
+    # legal name on both (BCP's Yape), but the generic brand search only finds
+    # apps whose title carries the brand.
+    lookups: list[tuple[str, str, str | None]] = []
+    seen_lookups: set[tuple[str, str]] = set()
     for dev in app_developers or []:
         store, name = dev.get("store"), dev.get("name")
         if not store or not name:
             continue
+        other = "google_play" if store == "app_store" else "app_store"
+        for st, artist_id in ((store, dev.get("artist_id")), (other, None)):
+            if st not in ("app_store", "google_play") or (st, _normalize(name)) in seen_lookups:
+                continue
+            seen_lookups.add((st, _normalize(name)))
+            lookups.append((st, name, artist_id))
+
+    seen_apps = {(a["store"], a["name"]) for a in result["apps"]}
+    for store, name, artist_id in lookups:
         try:
             if store == "app_store":
-                official = _lookup_apple_developer(name, dev.get("artist_id"))
-            elif store == "google_play":
-                official = _search_google_play_developer(name, locale)
+                official = _lookup_apple_developer(name, artist_id)
             else:
-                continue
+                official = _search_google_play_developer(name, locale)
         except Exception as e:
             logger.warning(f"[mobile_apps] developer lookup failed for '{name}' ({store}): {e}")
             continue
@@ -398,20 +413,44 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
             entry["official_developer"] = True
             result["apps"].append(entry)
 
-    # An app published by a confirmed developer is never a brand-impersonation hit.
-    confirmed = {(d.get("store"), _normalize(d.get("name") or "")) for d in app_developers or []}
-    if confirmed:
-        result["suspicious"] = [
-            a for a in result["suspicious"]
-            if (a["store"], _normalize(a.get("developer") or "")) not in confirmed
-        ]
+    # Any app whose developer is a confirmed one is official, however it was
+    # found. Without this the flag depended on whether the generic search had
+    # already returned the app (the developer lookup skips known apps), so the
+    # "monitored" check flickered between scans.
+    def by_confirmed_developer(entry: dict) -> bool:
+        return any(
+            entry["store"] == st and _matches_brand(entry.get("developer") or "", nm)
+            for st, nm, _ in lookups
+        )
+
+    for entry in result["apps"]:
+        if by_confirmed_developer(entry):
+            entry["official_developer"] = True
+    # Suspicious hits published by a confirmed developer are not impersonation:
+    # they are the company's own apps (same rule, now also for the official list).
+    still_suspicious = []
+    for entry in result["suspicious"]:
+        if by_confirmed_developer(entry):
+            entry["official_developer"] = True
+            if (entry["store"], entry["name"]) not in seen_apps:
+                seen_apps.add((entry["store"], entry["name"]))
+                result["apps"].append(entry)
+        else:
+            still_suspicious.append(entry)
+    result["suspicious"] = still_suspicious
 
     # Optional LLM layer: one batch verdict per candidate. llm_verdict stays
     # null when AI is not configured or the call fails.
     candidates = result["apps"] + result["suspicious"]
-    verdicts = _llm_classify_apps(domain, brand, candidates)
+    # Apps from a confirmed developer are official by definition: keep them out of
+    # the LLM batch (a shorter prompt answers faster and times out far less).
+    to_classify = [a for a in candidates if not a.get("official_developer")]
+    verdicts = _llm_classify_apps(domain, brand, to_classify)
     for app_entry in candidates:
-        app_entry["llm_verdict"] = verdicts.get((app_entry["store"], app_entry["name"]))
+        if app_entry.get("official_developer"):
+            app_entry["llm_verdict"] = "official"
+        else:
+            app_entry["llm_verdict"] = verdicts.get((app_entry["store"], app_entry["name"]))
         app_entry.setdefault("official_developer", False)
 
     # Impersonation needs evidence, not just a store hit. An app is reported only
@@ -426,7 +465,7 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
     def name_has_brand(entry: dict) -> bool:
         return bool(brand_norm) and brand_norm in _normalize(entry.get("name") or "")
 
-    if not verdicts and ai_available and candidates:
+    if not verdicts and ai_available and to_classify:
         logger.warning(f"[mobile_apps] LLM unavailable for '{brand}' — impersonation findings left unverified")
 
     confirmed: list[dict] = []

@@ -182,8 +182,10 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
     if (!a.developer) return false
     if (a.official_developer === true) return true
     if (domain && confirmedDevs.has(devKey(domain.id, a))) return true
+    // Normalized: store metadata drifts ("Banco de Crédito del Perú" vs "Banco de Credito del Peru")
+    const norm = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '')
     return (domain?.app_developers ?? []).some(
-      (d) => d.name === a.developer && d.store === a.store,
+      (d) => d.store === a.store && norm(d.name) === norm(a.developer ?? ''),
     )
   }
 
