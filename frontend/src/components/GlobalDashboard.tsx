@@ -1161,7 +1161,7 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
                     assets={visibleAssets}
                     search={search}
                     showCompany={!selectedCompany}
-                    domains={locked?.domains}
+                    domains={activeCompany?.domains ?? companies.flatMap((c) => c.domains)}
                     onChanged={() => load(true)}
                   />
                 )}
