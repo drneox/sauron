@@ -280,11 +280,29 @@ function DiscoveryPanel({
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [openSection, setOpenSection] = useState<'domains' | 'apps'>('domains')
+  const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set())
+  const [appError, setAppError] = useState('')
   const [adding, setAdding] = useState(false)
   const [addErrors, setAddErrors] = useState<Record<string, string>>({})
   const [duplicates, setDuplicates] = useState<Set<string>>(new Set())
 
   const existing = new Set(company.domains.map((d) => d.domain.toLowerCase()))
+
+  // Store metadata drifts ("Banco de Crédito del Perú" vs "Banco de Credito del Peru")
+  const normDev = (v: string) => v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  const appKey = (a: { store: string | null; name: string }) => `${a.store}:${a.name}`
+  const monitoredDevs = new Set(
+    company.domains.flatMap((d) => (d.app_developers ?? []).map((x) => `${x.store}:${normDev(x.name)}`)),
+  )
+  const isMonitored = (a: { store: string | null; developer: string | null }) =>
+    !!a.developer && monitoredDevs.has(`${a.store}:${normDev(a.developer)}`)
+  const toggleApp = (key: string) =>
+    setSelectedApps((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
 
   useEffect(() => {
     let cancelled = false
@@ -351,12 +369,15 @@ function DiscoveryPanel({
   const handleAddSelected = async () => {
     setAdding(true)
     setAddErrors({})
+    setAppError('')
     const failures: Record<string, string> = {}
     const dupes = new Set(duplicates)
+    const createdIds: number[] = []
     await Promise.allSettled(
       [...selected].map(async (domain) => {
         try {
-          await axios.post(`/api/companies/${company.id}/domains`, { domain })
+          const { data } = await axios.post(`/api/companies/${company.id}/domains`, { domain })
+          if (typeof data?.id === 'number') createdIds.push(data.id)
         } catch (err) {
           if (axios.isAxiosError(err) && err.response?.status === 409) {
             dupes.add(domain)
@@ -366,11 +387,42 @@ function DiscoveryPanel({
         }
       }),
     )
+
+    // Selected apps are monitored by confirming their developer as official for
+    // one of the company's domains: every scan of that domain then pulls the
+    // developer's whole catalog from both stores.
+    let appFailed = false
+    const picked = discoveredApps.filter((a) => selectedApps.has(appKey(a)) && a.store && a.developer)
+    if (picked.length > 0) {
+      const target = company.domains[0] ?? null
+      const targetId = target?.id ?? createdIds[0]
+      if (targetId == null) {
+        setAppError(t('companies.discovery.appsNeedDomain'))
+        appFailed = true
+      } else {
+        const current = (target?.app_developers ?? []).map((d) => ({ ...d }))
+        const merged = [...current]
+        for (const a of picked) {
+          const store = a.store as 'app_store' | 'google_play'
+          const name = a.developer as string
+          if (!merged.some((d) => d.store === store && normDev(d.name) === normDev(name))) {
+            merged.push({ store, name })
+          }
+        }
+        try {
+          await axios.put(`/api/domains/${targetId}/app-developers`, { app_developers: merged })
+        } catch (err) {
+          setAppError(errorMessage(err, t('companies.discovery.appsError')))
+          appFailed = true
+        }
+      }
+    }
+
     setDuplicates(dupes)
     setAddErrors(failures)
     setAdding(false)
     onAdded()
-    if (Object.keys(failures).length === 0) onClose()
+    if (Object.keys(failures).length === 0 && !appFailed) onClose()
   }
 
   const candidates = result?.candidates ?? []
@@ -507,7 +559,12 @@ function DiscoveryPanel({
                     className="w-full text-xs font-semibold text-dark-500 uppercase tracking-wider flex items-center gap-1.5 py-1.5 hover:text-dark-300 transition-colors duration-150"
                   >
                     <Smartphone className="w-3.5 h-3.5 text-cyber-600" />
-                    <span className="flex-1 text-left">{t('companies.discovery.appsTitle', { count: discoveredApps.length })}</span>
+                    <span className="flex-1 text-left">{t('companies.discovery.appsTitle', { count: discoveredApps.length })}
+                      {selectedApps.size > 0 && (
+                        <span className="ml-2 normal-case text-cyber-700 font-medium">
+                          {t('companies.discovery.selectedCount', { count: selectedApps.size })}
+                        </span>
+                      )}</span>
                     <ChevronDown className={clsx('w-3.5 h-3.5 transition-transform duration-150', activeSection === 'apps' && 'rotate-180')} />
                   </button>
                   {activeSection === 'apps' && (
@@ -515,6 +572,14 @@ function DiscoveryPanel({
                       <div className="space-y-1.5 overflow-y-auto flex-1 min-h-0 mt-1">
               {discoveredApps.map((a, i) => (
                 <div key={`${a.store}:${a.name}:${i}`} className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-dark-800 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedApps.has(appKey(a)) || isMonitored(a)}
+                    disabled={isMonitored(a) || adding || !a.developer || !a.store}
+                    onChange={() => toggleApp(appKey(a))}
+                    title={isMonitored(a) ? t('companies.discovery.appMonitored') : undefined}
+                    className="accent-cyber-600 disabled:opacity-40 shrink-0"
+                  />
                   <span className={clsx(
                     'text-[10px] px-1.5 py-0.5 rounded-full font-semibold border shrink-0',
                     a.store === 'app_store'
@@ -523,7 +588,15 @@ function DiscoveryPanel({
                   )}>
                     {a.store === 'app_store' ? 'App Store' : 'Google Play'}
                   </span>
-                  <span className="text-dark-100 font-medium truncate flex-1">{a.name}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-dark-100 font-medium truncate">{a.name}</span>
+                    {a.developer && <span className="block text-[11px] text-dark-500 truncate">{a.developer}</span>}
+                  </span>
+                  {isMonitored(a) && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold border shrink-0 bg-emerald-50 text-emerald-700 border-emerald-200">
+                      {t('companies.discovery.appMonitored')}
+                    </span>
+                  )}
                   {a.version && /^\d/.test(a.version) && <span className="text-xs text-dark-500 font-mono shrink-0">v{a.version}</span>}
                   {a.llm_verdict && (
                     <span className={clsx(
@@ -549,7 +622,10 @@ function DiscoveryPanel({
                 </div>
               )}
             </div>
-            {candidates.length > 0 && (
+            {appError && (
+              <div className="shrink-0 mt-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{appError}</div>
+            )}
+            {hasContent && (
               <div className="shrink-0 flex justify-end gap-2 mt-3 pt-3 border-t border-dark-800">
               <button
                 onClick={onClose}
@@ -560,10 +636,10 @@ function DiscoveryPanel({
               </button>
               <button
                 onClick={handleAddSelected}
-                disabled={adding || selected.size === 0}
+                disabled={adding || selected.size + selectedApps.size === 0}
                 className="text-xs px-4 py-1.5 bg-cyber-600 hover:bg-cyber-700 disabled:opacity-50 text-white font-semibold rounded-lg transition-colors duration-150"
               >
-                {adding ? t('companies.adding') : t('companies.discovery.addSelected', { count: selected.size })}
+                {adding ? t('companies.adding') : t('companies.discovery.addSelected', { count: selected.size + selectedApps.size })}
               </button>
               </div>
             )}
