@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useTranslation } from 'react-i18next'
+import { useAppVersion } from '../version'
 import { LoginResponse } from '../auth'
 import { Radar, ShieldCheck, Bot, Lock, Mail } from 'lucide-react'
 
@@ -19,6 +20,7 @@ function Spinner() {
 
 export default function LoginView({ onLogin }: Props) {
   const { t } = useTranslation()
+  const version = useAppVersion()
   const [mode, setMode] = useState<'login' | 'bootstrap'>('login')
   const [checking, setChecking] = useState(true)
   const [email, setEmail] = useState('')
@@ -195,7 +197,7 @@ export default function LoginView({ onLogin }: Props) {
             {t('login.protected')}
           </p>
           <p className="text-center text-xs text-dark-600">
-            Sauron ASM — © {new Date().getFullYear()}{' '}
+            Sauron ASM{version ? ` v${version}` : ''} — © {new Date().getFullYear()}{' '}
             <a href="https://sauron.punkbot.ai" target="_blank" rel="noopener noreferrer" className="hover:text-dark-400 transition-colors duration-150">punkbot.ai</a>
           </p>
         </div>

@@ -14,6 +14,8 @@ interface ScanSummary {
   completed_at: string | null
   grade: string | null
   kind?: ScanKind
+  note?: string | null
+  requeued_as?: string | null
 }
 
 interface Props {
@@ -122,6 +124,12 @@ export default function ScanHistory({ onViewReport, onScanStarted, readOnly = fa
                   <div className="text-dark-500 text-xs">
                     {new Date(s.started_at).toLocaleString()} · {(STATUS_KEYS as readonly string[]).includes(s.status) ? t(`history.status.${s.status}`) : s.status}
                   </div>
+                  {s.status === 'interrupted' && (
+                    <div className="text-[11px] text-amber-700 mt-0.5" title={s.note ?? undefined}>
+                      {s.note ? t('history.interruptedWhy', { reason: s.note }) : t('history.interruptedUnknown')}
+                      {s.requeued_as && <span className="text-emerald-700"> · {t('history.requeued')}</span>}
+                    </div>
+                  )}
                 </div>
                 {inFlight && (
                   <div className="text-xs text-cyber-700 animate-pulse font-mono">{s.progress}%</div>

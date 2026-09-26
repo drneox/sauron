@@ -31,6 +31,8 @@ export interface Scorecard {
   score: number
   grade: 'A' | 'B' | 'C' | 'D' | 'F'
   overall_risk: RiskLevel
+  // Set when the letter is worse than the score alone would give (worst-finding cap)
+  grade_capped_by?: { severity: string; modules: number; cap: string; score_grade: string } | null
 }
 
 // WHOIS
@@ -1001,6 +1003,10 @@ export interface ScanListItem {
   completed_at: string | null
   grade: string | null
   kind?: ScanKind
+  // Interrupted scans: why (backend restart, stopped by the user…) and the
+  // automatic retry, if one was queued
+  note?: string | null
+  requeued_as?: string | null
 }
 
 // GET /api/companies/{id}/assets/diff?from=&to=
@@ -1053,9 +1059,32 @@ export interface CompanyScoreChange {
   delta: number | null
 }
 
+// Date-window changes (GET /api/companies/:id/changes)
+export interface PeriodFinding {
+  domain: string
+  module: string
+  text: string
+  risk: string
+  category: string
+  status: string
+  first_seen_at: string | null
+  fixed_at: string | null
+  company?: string
+}
+
+export interface PeriodChanges extends AssetsDiff {
+  scans_in_period: { count: number; items: { domain: string; kind: string; completed_at: string }[] }
+  findings: { new: PeriodFinding[]; resolved: PeriodFinding[]; new_total: number; resolved_total: number }
+}
+
 export interface GlobalAssetsDiff {
   from_scan_at: string | null
   to_scan_at: string | null
+  scans_in_period?: number
+  findings_new?: PeriodFinding[]
+  findings_resolved?: PeriodFinding[]
+  findings_new_total?: number
+  findings_resolved_total?: number
   added: Partial<Record<AssetCategoryKey, GlobalDiffValue[]>>
   removed: Partial<Record<AssetCategoryKey, GlobalDiffValue[]>>
   modified: Partial<Record<AssetCategoryKey, GlobalModifiedEntry[]>>

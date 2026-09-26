@@ -31,6 +31,7 @@ load_dotenv()
 
 # Modules
 from modules import pdf_report
+from version import __version__
 from modules import (
     whois_lookup,
     dns_enum,
@@ -146,6 +147,46 @@ def _rate_limit_check(ip: str, hits_store: dict[str, list[float]], max_hits: int
     return True
 
 
+async def _recover_interrupted_scans() -> list[tuple[str, str, int | None]]:
+    """Startup sweep for scans the previous process left queued/running.
+
+    The queue lives in memory, so a restart (deploy, crash) loses them. Each one
+    is marked interrupted WITH the reason recorded, and full/host/discover scans
+    from the last 24h are re-queued once automatically — otherwise a scheduled
+    scan lost to a restart would not run again until its next interval. A scan
+    that is itself an automatic retry is never re-queued (no crash loops).
+    Returns (new_scan_id, target, domain_id) for the caller to enqueue once the
+    workers are up."""
+    rows = await Scan.filter(status__in=["queued", "running"]).select_related("domain")
+    if not rows:
+        return []
+    now = datetime.now(timezone.utc)
+    requeue: list[tuple[str, str, int | None]] = []
+    for row in rows:
+        was = row.status
+        info = {
+            "was": was,
+            "at": now.isoformat(),
+            "reason": ("the backend restarted before the scan started" if was == "queued"
+                       else "the backend restarted while the scan was running"),
+            "requeued_as": None,
+        }
+        is_recent = row.started_at is not None and now - row.started_at < timedelta(hours=24)
+        if row.kind in ("full", "host", "discover") and is_recent:
+            already_retry = await Scan.filter(result__contains={"interrupted": {"requeued_as": row.id}}).exists()
+            if not already_retry:
+                target = row.scan_target or row.domain.domain
+                new_id = _create_scan_entry(target, row.domain_id, kind=row.kind, created_by=row.created_by)
+                await _insert_queued_scan(new_id, target, row.domain_id)
+                requeue.append((new_id, target, row.domain_id))
+                info["requeued_as"] = new_id
+        row.status = "interrupted"
+        row.result = {"interrupted": info}
+        await row.save()
+    logger.info(f"Recovered {len(rows)} leftover scan(s): marked interrupted, {len(requeue)} re-queued automatically")
+    return requeue
+
+
 # ── Lifespan: DB, queue workers, scheduler ─────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -153,10 +194,10 @@ async def lifespan(app: FastAPI):
     upgraded = await hash_legacy_tokens()
     if upgraded:
         logger.info(f"Migrated {upgraded} legacy plaintext auth token(s) to sha256 at rest")
-    interrupted = await Scan.filter(status__in=["queued", "running"]).update(status="interrupted")
-    if interrupted:
-        logger.info(f"Marked {interrupted} leftover scan(s) as interrupted")
+    to_requeue = await _recover_interrupted_scans()
     await scan_queue.start(_run_and_persist_scan)
+    for new_id, target, domain_id in to_requeue:
+        await scan_queue.enqueue(new_id, target, domain_id)
     scheduler = asyncio.create_task(_scheduler_loop())
     yield
     scheduler.cancel()
@@ -169,7 +210,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Sauron API",
     description="Sauron — attack surface management with AI agent",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -565,20 +606,26 @@ def _overall_score(results: dict) -> dict:
     # any critical finding caps the grade at D; highs cap at C. Only non-info
     # findings count — raw counts drive the caps, category-weighted counts
     # drive the penalty (a misconfiguration counts 0.6, an exposure 0.25).
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}   # MODULES affected, per severity
     weighted = {"critical": 0.0, "high": 0.0, "medium": 0.0, "low": 0.0}
     by_category = {"vulnerability": 0, "misconfiguration": 0, "exposure": 0, "info": 0}
     for mod_name, mod in results.items():
         if not isinstance(mod, dict):
             continue
         r = mod.get("risk", "low")
+        scored_lines = 0
         for finding in mod.get("findings") or []:
             cat = _finding_category(mod_name, finding)
             by_category[cat] += 1
             if cat == "info" or r not in counts:
                 continue
-            counts[r] += 1
+            scored_lines += 1
             weighted[r] += CATEGORY_SCORE_WEIGHT[cat]
+        # Severity is a property of the module (every line inherits it), so the
+        # displayed count is "modules affected": a module with 45 lines is one
+        # medium, not 45. The penalty above keeps its line-based calibration.
+        if scored_lines:
+            counts[r] += 1
 
     penalty = (
         25 * (1 - math.exp(-weighted["critical"] / 2))      # saturate ~6 criticals
@@ -596,17 +643,20 @@ def _overall_score(results: dict) -> dict:
         grade = "D"
     else:
         grade = "F"
-    # Cap: the letter can never look better than the worst finding allows,
-    # and the score follows the cap so number and letter stay coherent.
-    if counts["critical"] > 0 and grade in ("A", "B", "C"):
-        grade = "D"
-        score = min(score, 59)
-    elif counts["high"] > 0 and grade in ("A", "B"):
-        grade = "C"
-        score = min(score, 74)
-    elif counts["medium"] > 0 and grade == "A":
-        grade = "B"
-        score = min(score, 89)
+    # The score stays the real 0-100 number (it is what ranks and charts domains);
+    # only the LETTER is capped: it can never look better than the worst finding
+    # allows (critical -> D, high -> C, medium -> B).
+    grade_order = "ABCDF"
+    cap_severity, cap_letter = next(
+        ((sev, letter) for sev, letter in (("critical", "D"), ("high", "C"), ("medium", "B"))
+         if counts[sev] > 0),
+        (None, None),
+    )
+    grade_capped_by = None
+    if cap_letter and grade_order.index(cap_letter) > grade_order.index(grade):
+        grade_capped_by = {"severity": cap_severity, "modules": counts[cap_severity],
+                           "cap": cap_letter, "score_grade": grade}
+        grade = cap_letter
     # Overall risk: only non-info modules can raise it — a large but clean
     # inventory must not read as "high risk".
     scored_risks = [
@@ -615,6 +665,7 @@ def _overall_score(results: dict) -> dict:
     ]
     overall_risk = _max_risk(*scored_risks) if scored_risks else "low"
     return {"score": score, "grade": grade, "overall_risk": overall_risk,
+            "grade_capped_by": grade_capped_by,
             "findings_by_severity": counts, "findings_by_category": by_category}
 
 
@@ -1167,7 +1218,11 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
 
     # Skip scans that were stopped while still in the queue
     if SCANS.get(scan_id, {}).get("stop_requested"):
-        await Scan.filter(id=scan_id).update(status="interrupted", current_module=None)
+        await Scan.filter(id=scan_id).update(
+            status="interrupted", current_module=None,
+            result={"interrupted": {"was": "queued", "reason": "stopped by the user before it started",
+                                    "at": datetime.now(timezone.utc).isoformat(), "requeued_as": None}},
+        )
         SCANS.pop(scan_id, None)
         logger.info(f"[{scan_id}] Skipped (stopped while queued)")
         return
@@ -1180,6 +1235,8 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
             status="interrupted",
             current_module=None,
             completed_at=datetime.now(timezone.utc),
+            result={"interrupted": {"was": "running", "reason": "stopped by the user",
+                                    "at": datetime.now(timezone.utc).isoformat(), "requeued_as": None}},
         )
         SCANS.pop(scan_id, None)
         return
@@ -1622,6 +1679,9 @@ async def _upsert_assets(dom: Domain, result: dict, scan_id: str) -> None:
                 old_ports = (rec.metadata or {}).get("open_ports")
                 if old_ports:
                     meta = meta | {"open_ports": old_ports}
+            if (rec.metadata or {}).get("manual"):
+                # Added by hand: a scan may refresh its data but never un-approve it
+                meta = meta | {"manual": True, "suspicious": False, "llm_verdict": "official"}
             if (rec.metadata or {}) != meta:
                 # Record only meaningful metadata changes; ports_scanned is
                 # internal bookkeeping that flips within a single scan.
@@ -1964,7 +2024,7 @@ async def _scheduler_loop() -> None:
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": __version__}
 
 
 # ── Auth & users (RBAC) ────────────────────────────────────────────────────────
@@ -2466,6 +2526,8 @@ async def list_scans(domain: str | None = Query(default=None)):
             "completed_at": s.completed_at.isoformat() if s.completed_at else None,
             "grade": (s.scorecard or {}).get("grade"),
             "kind": s.kind or (s.result or {}).get("kind", "full"),
+            "note": ((s.result or {}).get("interrupted") or {}).get("reason"),
+            "requeued_as": ((s.result or {}).get("interrupted") or {}).get("requeued_as"),
         }
     # Overlay in-flight scans (live progress)
     for s in SCANS.values():
@@ -2502,7 +2564,10 @@ async def stop_scan(scan_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if row.status in ("queued", "running"):
+        was = row.status
         row.status = "interrupted"
+        row.result = {"interrupted": {"was": was, "reason": "marked as stopped by the user (no live process)",
+                                      "at": datetime.now(timezone.utc).isoformat(), "requeued_as": None}}
         await row.save()
         return {"message": "Scan marked as interrupted"}
     raise HTTPException(status_code=409, detail="Scan is not running")
@@ -3305,7 +3370,7 @@ async def _build_company_assets(company: Company) -> dict:
 
     for asset in assets:
         threshold = surface_since.get(asset.domain_id)
-        if threshold and asset.last_seen_at and asset.last_seen_at < threshold:
+        if threshold and asset.last_seen_at and asset.last_seen_at < threshold and not (asset.metadata or {}).get("manual"):
             continue  # not seen since the 2nd-last completed scan — no longer current surface
         meta = asset.metadata or {}
         is_new = asset.first_seen_scan_id == last_scan_by_domain.get(asset.domain_id)
@@ -3433,6 +3498,77 @@ async def _record_app_rejections(assets: list[Asset]) -> None:
         await dom.save()
 
 
+class ManualAppRequest(BaseModel):
+    store: str
+    name: str
+    developer: str | None = None
+    url: str | None = None
+
+    @field_validator("store")
+    @classmethod
+    def validate_store(cls, v: str) -> str:
+        if v not in ("app_store", "google_play"):
+            raise ValueError("store must be 'app_store' or 'google_play'")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v or len(v) > 200:
+            raise ValueError("name must be 1-200 characters")
+        return v
+
+    @field_validator("developer")
+    @classmethod
+    def validate_developer(cls, v: str | None) -> str | None:
+        return (v or "").strip()[:200] or None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: str | None) -> str | None:
+        v = (v or "").strip()
+        if v and not v.lower().startswith(("http://", "https://")):
+            raise ValueError("url must start with http:// or https://")
+        return v or None
+
+
+@app.post("/api/domains/{domain_id}/apps", dependencies=[Depends(require_role("operator", "admin"))])
+async def add_manual_app(domain_id: int, request: ManualAppRequest):
+    """Add an app to a domain's inventory by hand. Overrides the rejection
+    memory (an app deleted earlier can be added back) and is exempt from the
+    'current surface' aging, since store searches may never return it."""
+    dom = await Domain.get_or_none(id=domain_id)
+    if dom is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    store, name = request.store, request.name
+    dom.app_rejections = [
+        r for r in (dom.app_rejections or [])
+        if not (isinstance(r, dict) and r.get("store") == store
+                and str(r.get("name") or "").strip().lower() == name.lower())
+    ]
+    await dom.save()
+    value = f"{store}:{name}"[:1024]
+    meta = {
+        "name": name, "store": store, "os": "ios" if store == "app_store" else "android",
+        "version": None, "developer": request.developer, "url": request.url, "updated": None,
+        "llm_verdict": "official", "official_developer": False, "suspicious": False, "manual": True,
+    }
+    asset = await Asset.get_or_none(domain_id=dom.id, type="app", value=value)
+    if asset is not None:
+        old = asset.metadata or {}
+        asset.metadata = {**meta, **{k: old[k] for k in ("version", "updated") if old.get(k)},
+                          "developer": request.developer or old.get("developer"),
+                          "url": request.url or old.get("url")}
+        await asset.save()
+    else:
+        asset = await Asset.create(
+            domain_id=dom.id, type="app", value=value, metadata=meta,
+            first_seen_scan_id="manual", last_seen_scan_id="manual",
+        )
+    return {"id": asset.id, "domain_id": dom.id, "value": value, "metadata": asset.metadata}
+
+
 @app.delete("/api/assets/{asset_id}", dependencies=[Depends(require_role("operator", "admin"))])
 async def delete_asset(asset_id: int):
     asset = await Asset.get_or_none(id=asset_id)
@@ -3537,7 +3673,7 @@ async def _collect_company_hosts(company: Company) -> dict:
     current: list[Asset] = []
     for a in assets:
         threshold = surface_since.get(a.domain_id)
-        if threshold and a.last_seen_at and a.last_seen_at < threshold:
+        if threshold and a.last_seen_at and a.last_seen_at < threshold and not (a.metadata or {}).get("manual"):
             continue  # same current-surface rule as _build_company_assets
         current.append(a)
 
@@ -4124,6 +4260,142 @@ async def company_assets_diff(
             "from_grade": (from_scan.scorecard or {}).get("grade"),
             "to_grade": (to_scan.scorecard or {}).get("grade"),
             "delta": (to_score - from_score) if from_score is not None and to_score is not None else None,
+        },
+    }
+
+
+def _parse_period_bound(value: str, end: bool) -> datetime:
+    """'YYYY-MM-DD' (a whole day) or an ISO datetime. An end date is inclusive."""
+    v = (value or "").strip()
+    try:
+        if len(v) == 10:
+            day = datetime.fromisoformat(v).replace(tzinfo=timezone.utc)
+            return day + timedelta(days=1) - timedelta(microseconds=1) if end else day
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date '{value}' — use YYYY-MM-DD or ISO 8601")
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _grade_of_score(score: float) -> str:
+    return "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+
+
+@app.get("/api/companies/{company_id}/changes")
+async def company_changes(company_id: int, from_: str = Query(alias="from"), to: str = Query()):
+    """What changed in a company between two DATES, independent of which scans
+    ran: new/removed/modified assets (endpoints, ports, apps, subdomains...) and
+    new/resolved findings. Unlike /assets/diff it never snaps the dates to a
+    scan, so it works for any window — an empty result just means nothing changed."""
+    company = await Company.get_or_none(id=company_id)
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+    from_at, to_at = _parse_period_bound(from_, end=False), _parse_period_bound(to, end=True)
+    if to_at <= from_at:
+        raise HTTPException(status_code=400, detail="'to' must be later than 'from'")
+    domains = await Domain.filter(company_id=company_id)
+    if not domains:
+        raise HTTPException(status_code=409, detail="No domains registered for this company")
+    dom_names = {d.id: d.domain for d in domains}
+    domain_ids = list(dom_names)
+
+    all_scans = await Scan.filter(
+        domain_id__in=domain_ids, status="completed", kind__in=["full", "discover"],
+        completed_at__lte=to_at,
+    ).order_by("completed_at")
+    latest_by_domain: dict[int, Scan] = {}          # latest completed scan <= to
+    baseline_by_domain: dict[int, Scan] = {}        # latest completed scan <= from
+    in_period: list[Scan] = []
+    for sc in all_scans:
+        latest_by_domain[sc.domain_id] = sc
+        if sc.completed_at <= from_at:
+            baseline_by_domain[sc.domain_id] = sc
+        else:
+            in_period.append(sc)
+
+    groups = list(ASSET_TYPE_GROUPS.values())
+    added: dict[str, list[str]] = {g: [] for g in groups}
+    removed: dict[str, list[str]] = {g: [] for g in groups}
+    for asset in await Asset.filter(domain_id__in=domain_ids):
+        group = ASSET_TYPE_GROUPS.get(asset.type)
+        if group is None:
+            continue
+        meta = asset.metadata or {}
+        shown = (meta.get("name") or asset.value.split(":", 1)[-1]) if asset.type == "app" else asset.value
+        if asset.first_seen_at and from_at < asset.first_seen_at <= to_at:
+            added[group].append(shown)
+        elif (asset.first_seen_at and asset.first_seen_at <= from_at and not meta.get("manual")
+              and asset.last_seen_at and from_at <= asset.last_seen_at):
+            # Gone: last seen inside the period AND a later scan (still within it)
+            # ran without seeing it. Without that scan we can't say it left.
+            latest = latest_by_domain.get(asset.domain_id)
+            if latest and latest.completed_at > asset.last_seen_at and asset.last_seen_at <= to_at:
+                removed[group].append(shown)
+    for g in groups:
+        added[g].sort(); removed[g].sort()
+
+    history = await AssetHistory.filter(
+        asset__domain_id__in=domain_ids, changed_at__gt=from_at, changed_at__lte=to_at,
+    ).select_related("asset").order_by("changed_at", "id")
+    modified: dict[str, list[dict]] = {g: [] for g in groups}
+    collapsed: dict[tuple[int, str], dict] = {}
+    for row in history:
+        group = ASSET_TYPE_GROUPS.get(row.asset.type)
+        if group is None:
+            continue
+        old_meta, new_meta = row.old_metadata or {}, row.new_metadata or {}
+        for field in sorted((set(old_meta) | set(new_meta)) - {"ports_scanned"}):
+            if old_meta.get(field) == new_meta.get(field):
+                continue
+            entry = collapsed.setdefault((row.asset_id, field), {
+                "value": row.asset.value, "field": field,
+                "old": old_meta.get(field), "new": new_meta.get(field), "_group": group,
+            })
+            entry["new"] = new_meta.get(field)
+    for entry in collapsed.values():
+        if entry["old"] != entry["new"]:
+            modified[entry.pop("_group")].append(entry)
+    for g in groups:
+        modified[g].sort(key=lambda e: (e["value"], e["field"]))
+
+    def _finding_row(f: Finding) -> dict:
+        return {"domain": dom_names.get(f.domain_id, ""), "module": f.module, "text": f.text,
+                "risk": f.risk, "category": f.category, "status": f.status,
+                "first_seen_at": f.first_seen_at.isoformat() if f.first_seen_at else None,
+                "fixed_at": f.fixed_at.isoformat() if f.fixed_at else None}
+
+    risk_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    new_f = await Finding.filter(domain_id__in=domain_ids, first_seen_at__gt=from_at, first_seen_at__lte=to_at)
+    res_f = await Finding.filter(domain_id__in=domain_ids, status="fixed", fixed_at__gt=from_at, fixed_at__lte=to_at)
+    sort_key = lambda f: (risk_rank.get(f.risk, 9), f.domain_id, f.text)
+    cap = 300
+
+    def _avg(by_domain: dict[int, Scan]) -> float | None:
+        scores = [(sc.scorecard or {}).get("score") for sc in by_domain.values()]
+        scores = [x for x in scores if isinstance(x, (int, float))]
+        return round(sum(scores) / len(scores)) if scores else None
+
+    score_from, score_to = _avg(baseline_by_domain), _avg(latest_by_domain)
+    return {
+        "from_at": from_at.isoformat(),
+        "to_at": to_at.isoformat(),
+        "from_scan_at": from_at.isoformat(),
+        "to_scan_at": to_at.isoformat(),
+        "scans_in_period": {
+            "count": len(in_period),
+            "items": [{"domain": dom_names.get(sc.domain_id, ""), "kind": sc.kind,
+                       "completed_at": sc.completed_at.isoformat()} for sc in in_period[-50:]],
+        },
+        "added": added, "removed": removed, "modified": modified,
+        "findings": {
+            "new": [_finding_row(f) for f in sorted(new_f, key=sort_key)[:cap]],
+            "resolved": [_finding_row(f) for f in sorted(res_f, key=sort_key)[:cap]],
+            "new_total": len(new_f), "resolved_total": len(res_f),
+        },
+        "score_change": {
+            "from_grade": _grade_of_score(score_from) if score_from is not None else None,
+            "to_grade": _grade_of_score(score_to) if score_to is not None else None,
+            "delta": (score_to - score_from) if score_from is not None and score_to is not None else None,
         },
     }
 

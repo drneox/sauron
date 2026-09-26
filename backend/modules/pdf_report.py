@@ -420,6 +420,15 @@ def _build_cover(domain: str, report: dict, styles: dict) -> list:
         ParagraphStyle("or", fontName="Helvetica-Bold", fontSize=11,
                        textColor=risk_col, alignment=TA_CENTER, leading=16),
     ))
+    capped = (report.get("scorecard") or {}).get("grade_capped_by")
+    if capped:
+        n = capped.get("modules", 0)
+        elems.append(Paragraph(
+            f'Grade capped at {capped.get("cap")} by {n} module{"s" if n != 1 else ""} '
+            f'with {capped.get("severity")} risk (score equals grade {capped.get("score_grade")})',
+            ParagraphStyle("cap", fontName="Helvetica", fontSize=8.5,
+                           textColor=colors.HexColor("#94a3b8"), alignment=TA_CENTER, leading=12),
+        ))
     elems.append(_spacer(2))
 
     # Meta table

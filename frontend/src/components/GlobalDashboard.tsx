@@ -10,6 +10,8 @@ import {
   CompanyHosts,
   AssetSummary,
   ScanListItem,
+  PeriodChanges,
+  PeriodFinding,
   WithCompany,
   AssetsDiff,
   GlobalAssetsDiff,
@@ -27,7 +29,8 @@ import {
   td,
 } from './assetTable'
 import { HostTable, HostFilter, TaggedHost } from './hostTable'
-import { downloadFromApi } from './ui'
+import { downloadFromApi, LinkifyText, RiskBadge } from './ui'
+import AddAppModal from './AddAppModal'
 import AttackSurfaceGraph from './AttackSurfaceGraph'
 import RatingTrendCard from './RatingTrend'
 import DashboardAnalytics from './DashboardAnalytics'
@@ -38,6 +41,7 @@ import {
   ArrowLeftRight,
   ClipboardCheck,
   Download,
+  Plus,
   FileText,
   FileWarning,
   Network,
@@ -405,6 +409,59 @@ function ScoreChangeList({ changes }: { changes: CompanyScoreChange[] }) {
   )
 }
 
+function PeriodFindingList({ items, total, showCompany }: { items: PeriodFinding[]; total: number; showCompany: boolean }) {
+  const { t } = useTranslation()
+  const [showAll, setShowAll] = useState(false)
+  const shown = showAll ? items : items.slice(0, 25)
+  return (
+    <div className="space-y-1.5">
+      <ul className="divide-y divide-dark-800">
+        {shown.map((f, i) => (
+          <li key={`${f.company}:${f.domain}:${f.module}:${i}`} className="py-1.5 flex items-start gap-2">
+            <RiskBadge risk={(['critical', 'high', 'medium', 'low', 'info'].includes(f.risk) ? f.risk : 'low') as 'critical' | 'high' | 'medium' | 'low' | 'info'} />
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 font-mono whitespace-nowrap">{f.module}</span>
+            <span className="text-xs text-dark-200 flex-1 min-w-0 break-words">
+              <LinkifyText text={f.text} baseUrl={`https://${f.domain}`} />
+              <span className="text-dark-500"> — {showCompany && f.company ? `${f.company} · ` : ''}{f.domain}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+      {(items.length > 25 || total > items.length) && (
+        <div className="flex items-center gap-3 text-[11px] text-dark-500">
+          <span>{t('dashboard.showingOf', { shown: shown.length, total })}</span>
+          {items.length > 25 && (
+            <button onClick={() => setShowAll((o) => !o)} className="text-cyber-700 hover:underline">
+              {showAll ? '−' : '+'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PeriodFindingsSection({ diff, showCompany }: { diff: GlobalAssetsDiff; showCompany: boolean }) {
+  const { t } = useTranslation()
+  const fresh = diff.findings_new ?? []
+  const resolved = diff.findings_resolved ?? []
+  if (fresh.length === 0 && resolved.length === 0) {
+    return <p className="text-xs text-dark-500">{t('dashboard.noFindingChanges')}</p>
+  }
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="space-y-1">
+        <div className="text-xs font-semibold text-red-700">{t('dashboard.newFindings', { count: diff.findings_new_total ?? fresh.length })}</div>
+        <PeriodFindingList items={fresh} total={diff.findings_new_total ?? fresh.length} showCompany={showCompany} />
+      </div>
+      <div className="space-y-1">
+        <div className="text-xs font-semibold text-emerald-700">{t('dashboard.resolvedFindings', { count: diff.findings_resolved_total ?? resolved.length })}</div>
+        <PeriodFindingList items={resolved} total={diff.findings_resolved_total ?? resolved.length} showCompany={showCompany} />
+      </div>
+    </div>
+  )
+}
+
 function GlobalDiffResult({ diff, showCompany = true }: { diff: GlobalAssetsDiff; showCompany?: boolean }) {
   const { t } = useTranslation()
   const categories = DIFF_ORDER.filter(
@@ -462,6 +519,8 @@ function GlobalDiffResult({ diff, showCompany = true }: { diff: GlobalAssetsDiff
           })}
         </div>
       </div>
+
+      <PeriodFindingsSection diff={diff} showCompany={showCompany} />
 
       {diff.skipped_companies.length > 0 && (
         <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -526,12 +585,14 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
 
   // Compare mode (aggregated across companies)
   const [compareMode, setCompareMode] = useState(false)
-  const [scanHistory, setScanHistory] = useState<ScanListItem[]>([])
-  const [fromScanId, setFromScanId] = useState('')
-  const [toScanId, setToScanId] = useState('')
+  const isoDay = (d: Date) => d.toISOString().slice(0, 10)
+  const daysAgo = (n: number) => isoDay(new Date(Date.now() - n * 86_400_000))
+  const [fromDate, setFromDate] = useState(daysAgo(7))
+  const [toDate, setToDate] = useState(isoDay(new Date()))
   const [diff, setDiff] = useState<GlobalAssetsDiff | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState('')
+  const [addAppOpen, setAddAppOpen] = useState(false)
   // Optional visualization, toggled in Settings
   const [constellationOn, setConstellationOn] = useState(false)
   useEffect(() => {
@@ -773,25 +834,8 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
       }
     : totals
 
-  const loadScanHistory = useCallback(async () => {
-    const relevant = selectedCompany ? [selectedCompany] : companies
-    const domainNames = new Set(relevant.flatMap((c) => c.domains.map((d) => d.domain)))
-    try {
-      const { data: scans } = await axios.get<ScanListItem[]>('/api/scans')
-      const completed = scans
-        .filter((s) => s.status === 'completed' && domainNames.has(s.domain))
-        .sort((a, b) => (b.completed_at ?? b.started_at ?? '').localeCompare(a.completed_at ?? a.started_at ?? ''))
-      setScanHistory(completed)
-      setToScanId(completed[0]?.scan_id ?? '')
-      setFromScanId(completed[1]?.scan_id ?? completed[0]?.scan_id ?? '')
-    } catch { /* leave dropdowns empty */ }
-  }, [companies, selectedCompany])
-
   const toggleCompareMode = () => {
-    setCompareMode((prev) => {
-      if (!prev) loadScanHistory()
-      return !prev
-    })
+    setCompareMode((prev) => !prev)
     setDiff(null)
     setDiffError('')
   }
@@ -801,20 +845,28 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
     if (compareMode) {
       setDiff(null)
       setDiffError('')
-      loadScanHistory()
     }
   }, [companyFilter]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  const applyPreset = (days: number) => {
+    setFromDate(daysAgo(days))
+    setToDate(isoDay(new Date()))
+  }
+
   const handleCompare = async () => {
-    if (!fromScanId || !toScanId) return
+    if (!fromDate || !toDate) return
+    if (fromDate > toDate) {
+      setDiffError(t('dashboard.dateRangeInvalid'))
+      return
+    }
     setDiffLoading(true)
     setDiff(null)
     setDiffError('')
     const targets = selectedCompany ? [selectedCompany] : companies
     const results = await Promise.allSettled(
       targets.map(async (c) => {
-        const { data } = await axios.get<AssetsDiff>(`/api/companies/${c.id}/assets/diff`, {
-          params: { from: fromScanId, to: toScanId },
+        const { data } = await axios.get<PeriodChanges>(`/api/companies/${c.id}/changes`, {
+          params: { from: fromDate, to: toDate },
         })
         return { company: c.name, data }
       }),
@@ -822,6 +874,11 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
     const merged: GlobalAssetsDiff = {
       from_scan_at: null,
       to_scan_at: null,
+      scans_in_period: 0,
+      findings_new: [],
+      findings_resolved: [],
+      findings_new_total: 0,
+      findings_resolved_total: 0,
       added: {},
       removed: {},
       modified: {},
@@ -833,6 +890,11 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
       const { company, data: d } = r.value
       merged.from_scan_at = merged.from_scan_at ?? d.from_scan_at ?? null
       merged.to_scan_at = merged.to_scan_at ?? d.to_scan_at ?? null
+      merged.scans_in_period = (merged.scans_in_period ?? 0) + (d.scans_in_period?.count ?? 0)
+      for (const f of d.findings?.new ?? []) merged.findings_new!.push({ ...f, company })
+      for (const f of d.findings?.resolved ?? []) merged.findings_resolved!.push({ ...f, company })
+      merged.findings_new_total! += d.findings?.new_total ?? 0
+      merged.findings_resolved_total! += d.findings?.resolved_total ?? 0
       for (const cat of DIFF_ORDER) {
         for (const v of d.added?.[cat] ?? []) {
           (merged.added[cat] ??= []).push({ value: v, company })
@@ -857,8 +919,8 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
     setDiffLoading(false)
     if (merged.score_changes.length === 0) {
       const rejected = results.find((r) => r.status === 'rejected')
-      const detail = rejected && axios.isAxiosError(rejected.reason) && rejected.reason.response?.status === 409
-        ? rejected.reason.response.data?.detail
+      const detail = rejected && axios.isAxiosError(rejected.reason) && [400, 409].includes(rejected.reason.response?.status ?? 0)
+        ? rejected.reason.response?.data?.detail
         : null
       setDiffError(detail || t('dashboard.diffError'))
       return
@@ -1021,6 +1083,15 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
       {/* Compliance coverage — only in single-company context */}
       {activeCompany && <ComplianceSection companyId={activeCompany.id} />}
 
+      {addAppOpen && (
+        <AddAppModal
+          domains={activeCompany?.domains ?? companies.flatMap((c) => c.domains)}
+          defaultDomain={activeCompany?.domains[0]?.domain}
+          onClose={() => setAddAppOpen(false)}
+          onAdded={() => load(true)}
+        />
+      )}
+
       {compareMode && (
         <div className="card space-y-4">
           <div className="flex flex-wrap items-end gap-3">  <h3 className="text-[15px] font-semibold tracking-tight text-dark-100 flex-1 min-w-[120px]">
@@ -1028,39 +1099,39 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
             </h3>
             <label className="space-y-1">
               <span className="block text-[10px] font-semibold text-dark-500 uppercase tracking-wider">{t('dashboard.from')}</span>
-              <select
-                value={fromScanId}
-                onChange={(e) => setFromScanId(e.target.value)}
-                className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150 max-w-[260px]"
-              >
-                {scanHistory.length === 0 && <option value="">{t('dashboard.noCompletedScans')}</option>}
-                {scanHistory.map((s) => (
-                  <option key={s.scan_id} value={s.scan_id}>
-                    {s.domain} — {s.completed_at ? fmtShort(s.completed_at) : fmtShort(s.started_at ?? '')}
-                    {s.grade ? ` — ${s.grade}` : ''}
-                  </option>
-                ))}
-              </select>
+              <input
+                type="date"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150"
+              />
             </label>
             <label className="space-y-1">
               <span className="block text-[10px] font-semibold text-dark-500 uppercase tracking-wider">{t('dashboard.to')}</span>
-              <select
-                value={toScanId}
-                onChange={(e) => setToScanId(e.target.value)}
-                className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150 max-w-[260px]"
-              >
-                {scanHistory.length === 0 && <option value="">{t('dashboard.noCompletedScans')}</option>}
-                {scanHistory.map((s) => (
-                  <option key={s.scan_id} value={s.scan_id}>
-                    {s.domain} — {s.completed_at ? fmtShort(s.completed_at) : fmtShort(s.started_at ?? '')}
-                    {s.grade ? ` — ${s.grade}` : ''}
-                  </option>
-                ))}
-              </select>
+              <input
+                type="date"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={(e) => setToDate(e.target.value)}
+                className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 transition-colors duration-150"
+              />
             </label>
+            <div className="flex items-center gap-1">
+              {([['presetDay', 1], ['presetWeek', 7], ['presetMonth', 30]] as const).map(([key, days]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => applyPreset(days)}
+                  className="text-[11px] px-2 py-1.5 rounded-lg border border-dark-700 bg-white hover:bg-dark-900 text-dark-300 transition-colors duration-150"
+                >
+                  {t(`dashboard.${key}`)}
+                </button>
+              ))}
+            </div>
             <button
               onClick={handleCompare}
-              disabled={diffLoading || !fromScanId || !toScanId}
+              disabled={diffLoading || !fromDate || !toDate}
               className="text-xs px-4 py-1.5 bg-cyber-600 hover:bg-cyber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold rounded-lg transition-colors duration-150"
             >
               {diffLoading ? t('dashboard.comparing') : t('dashboard.compare')}
@@ -1075,11 +1146,13 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
 
           {diff && !diffError && (
             <>
-              {(diff.from_scan_at || diff.to_scan_at) && (
-                <div className="text-xs text-dark-500">
-                  {diff.from_scan_at ? fmtShort(diff.from_scan_at) : '—'} → {diff.to_scan_at ? fmtShort(diff.to_scan_at) : '—'}
-                </div>
-              )}
+              <div className="text-xs text-dark-500">
+                {fromDate} → {toDate}
+                {' · '}
+                {(diff.scans_in_period ?? 0) > 0
+                  ? t('dashboard.scansInPeriod', { count: diff.scans_in_period })
+                  : t('dashboard.noScansInPeriod')}
+              </div>
               <GlobalDiffResult diff={diff} showCompany={!locked} />
             </>
           )}
@@ -1212,6 +1285,12 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
                   >
                     <RefreshCw className={clsx('w-3.5 h-3.5', rescanning && 'animate-spin')} />
                     {t('dashboard.rescanModule')}
+                  </button>
+                )}
+                {category === 'apps' && !readOnly && (
+                  <button onClick={() => setAddAppOpen(true)} className="btn-secondary">
+                    <Plus className="w-3.5 h-3.5" />
+                    {t('assets.addApp.button')}
                   </button>
                 )}
                 {category === 'apps' && suspiciousAppCount > 0 && (

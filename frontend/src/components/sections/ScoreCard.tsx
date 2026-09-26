@@ -73,6 +73,16 @@ export default function ScoreCard({ scorecard, modules }: Props) {
                 />
               </div>
               <div className="text-dark-500 text-xs mt-1">{scorecard.score}/100</div>
+              {scorecard.grade_capped_by && (
+                <div className="text-[11px] text-dark-500 mt-2 leading-snug">
+                  {t('report.scorecard.gradeCapped', {
+                    cap: scorecard.grade_capped_by.cap,
+                    count: scorecard.grade_capped_by.modules,
+                    severity: t(`report.scorecard.sev.${scorecard.grade_capped_by.severity}`),
+                    scoreGrade: scorecard.grade_capped_by.score_grade,
+                  })}
+                </div>
+              )}
             </div>
           </>
         )}
