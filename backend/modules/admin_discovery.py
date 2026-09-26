@@ -61,11 +61,6 @@ ADMIN_PATHS = [
     "/server-status", "/server-info",
 ]
 
-# These paths should never be public — 403 alone (with unique body) is enough
-ALWAYS_REPORT_403 = {
-    "/actuator/env", "/actuator/beans", "/actuator/mappings",
-}
-
 # Content signals confirming a 200 is a real admin/login page
 _LOGIN_SIGNALS: list[bytes] = [
     b'type="password"', b"type='password'", b"type=password",
@@ -131,7 +126,8 @@ async def _calibrate(client: httpx.AsyncClient, base_url: str) -> dict:
 def _severity(path: str, status: int) -> str:
     p = path.lower()
     if "/actuator/" in p or p in ("/actuator", "/actuator/"):
-        return "critical"
+        # Critical only when actually reachable; behind auth (401) it is protected
+        return "critical" if status == 200 else "medium"
     high_pat = ("/phpmyadmin", "/pma", "/admin", "/administrator", "/wp-admin",
                 "/wp-login", "/graphiql", "/swagger", "/console", "/debug",
                 "/jenkins", "/portainer", "/grafana", "/kibana")
@@ -164,10 +160,6 @@ async def _probe(client: httpx.AsyncClient, base_url: str, path: str, baseline: 
             return None
         if baseline["homepage_hash"] and bh == baseline["homepage_hash"]:
             return None
-        if path in ALWAYS_REPORT_403:
-            return {"path": path, "url": url, "status": status,
-                    "severity": _severity(path, status), "content_type": ct,
-                    "size": len(body), "redirect_to": None}
         # 403 = blocked/forbidden, not an exposed panel — informational only,
         # kept out of `found` so it never shows up as a positive admin panel
         return {"path": path, "url": url, "status": status,
