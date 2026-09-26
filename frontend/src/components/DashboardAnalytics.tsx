@@ -57,16 +57,18 @@ interface Analytics {
 
 const chartText = { fontSize: 11, fill: '#64748b' }
 
-export default function DashboardAnalytics({ companyId }: { companyId: number | null }) {
+export default function DashboardAnalytics({ companyId, domain = null }: { companyId: number | null; domain?: string | null }) {
   const { t } = useTranslation()
   const [data, setData] = useState<Analytics | null>(null)
 
   useEffect(() => {
     setData(null)
-    axios.get<Analytics>('/api/dashboard/analytics', { params: companyId ? { company_id: companyId } : {} })
+    axios.get<Analytics>('/api/dashboard/analytics', {
+      params: { ...(companyId ? { company_id: companyId } : {}), ...(domain ? { domain } : {}) },
+    })
       .then(({ data }) => setData(data))
       .catch(() => setData(null))
-  }, [companyId])
+  }, [companyId, domain])
 
   if (!data) return null
 

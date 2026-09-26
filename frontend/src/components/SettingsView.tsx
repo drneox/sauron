@@ -18,6 +18,7 @@ import {
   Network,
   Puzzle,
   Radar,
+  Sparkles,
   X,
   type LucideIcon,
 } from 'lucide-react'
@@ -197,6 +198,7 @@ export default function SettingsView() {
     chain_eval_fuzz?: boolean
     chain_eval_scope?: 'new' | 'all'
     ai_domain_suggestions?: boolean
+    constellation_enabled?: boolean
   }) => {
     if (!settings) return
     const prev = settings
@@ -497,6 +499,20 @@ export default function SettingsView() {
                   <option value="all_alive">{t('settings.fanoutScopeAllAlive')}</option>
                 </select>
                 <span className="text-xs text-dark-500">{t('settings.fanoutScopeHint')}</span>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Dashboard: optional visualizations */}
+          <SectionCard title={t('settings.dashboardTitle')} icon={<Sparkles />}>
+            <div className="flex flex-wrap items-center gap-3">
+              <Switch
+                checked={settings.constellation_enabled ?? false}
+                onChange={(next) => saveChainEval({ constellation_enabled: next })}
+              />
+              <div>
+                <span className="text-sm text-dark-200">{t('settings.constellationToggle')}</span>
+                <p className="text-xs text-dark-500 leading-relaxed">{t('settings.constellationDesc')}</p>
               </div>
             </div>
           </SectionCard>

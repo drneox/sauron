@@ -28,6 +28,7 @@ import {
 } from './assetTable'
 import { HostTable, HostFilter, TaggedHost } from './hostTable'
 import { downloadFromApi } from './ui'
+import AttackSurfaceGraph from './AttackSurfaceGraph'
 import RatingTrendCard from './RatingTrend'
 import DashboardAnalytics from './DashboardAnalytics'
 import PortfolioSection from './PortfolioSection'
@@ -139,6 +140,31 @@ function filterByCompany(assets: AssetInventory, companyName: string | null): As
   }
 }
 
+function filterByDomain(assets: AssetInventory, domain: string): AssetInventory {
+  if (!domain) return assets
+  const d = domain.toLowerCase()
+  const byDomain = <T,>(rows: T[] | undefined): T[] =>
+    (rows ?? []).filter((r) => String((r as { domain?: string }).domain ?? '').toLowerCase() === d)
+  return {
+    subdomains: byDomain(assets.subdomains),
+    ips: (assets.ips ?? []).filter((r) => ((r as { domains?: string[] }).domains ?? []).some((x) => x.toLowerCase() === d)),
+    endpoints: byDomain(assets.endpoints),
+    technologies: byDomain(assets.technologies),
+    admin_panels: byDomain(assets.admin_panels),
+    exposed_files: byDomain(assets.exposed_files),
+    ports: byDomain(assets.ports),
+    apps: byDomain(assets.apps),
+    neighbors: byDomain(assets.neighbors),
+  }
+}
+
+function filterHostsByDomain(hosts: TaggedHost[], domain: string): TaggedHost[] {
+  const d = domain.toLowerCase()
+  const named = hosts.filter((h) => h.kind !== 'ip' && (h.domain.toLowerCase() === d || h.value.toLowerCase() === d))
+  const ips = new Set(named.flatMap((h) => h.ips ?? []))
+  return hosts.filter((h) => named.includes(h) || (h.kind === 'ip' && ips.has(h.value)))
+}
+
 const recurrenceLabel = (d: CompanyDomain, offLabel: string) => {
   const s = d.schedule
   if (!s || !s.enabled) return offLabel
@@ -210,10 +236,12 @@ function CompaniesTable({ companies, search, onOpenCompany }: {
   )
 }
 
-function DomainsTable({ companies, search, showCompany }: {
+function DomainsTable({ companies, search, showCompany, activeDomain, onSelectDomain }: {
   companies: Company[]
   search: string
   showCompany: boolean
+  activeDomain: string
+  onSelectDomain: (companyName: string, domain: string) => void
 }) {
   const { t } = useTranslation()
   const q = search.trim().toLowerCase()
@@ -239,7 +267,15 @@ function DomainsTable({ companies, search, showCompany }: {
             </td>
           </tr>
         ) : rows.map((d) => (
-          <tr key={`${d.company}:${d.id}`} className="hover:bg-dark-800/40">
+          <tr
+            key={`${d.company}:${d.id}`}
+            onClick={(e) => {
+              if ((e.target as HTMLElement).closest('a')) return
+              onSelectDomain(d.company, d.domain)
+            }}
+            title={t('dashboard.filterToDomainTitle', { name: d.domain })}
+            className={clsx('cursor-pointer', activeDomain === d.domain ? 'bg-cyber-50' : 'hover:bg-dark-800/40')}
+          >
             <LinkValueCell
               asset={{ value: d.domain, first_seen: d.created_at, last_seen: d.last_scan_at ?? d.created_at, is_new: false }}
               href={`https://${d.domain}`}
@@ -485,6 +521,8 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   const [search, setSearch] = useState('')
   const [companyFilter, setCompanyFilter] = useState(locked ? String(locked.id) : '')
   const [scanInProgress, setScanInProgress] = useState(false)
+  // Domain filter: scoped to the company it was picked in, so switching company drops it
+  const [domainSel, setDomainSel] = useState<{ companyId: number; domain: string } | null>(null)
 
   // Compare mode (aggregated across companies)
   const [compareMode, setCompareMode] = useState(false)
@@ -494,6 +532,13 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   const [diff, setDiff] = useState<GlobalAssetsDiff | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState('')
+  // Optional visualization, toggled in Settings
+  const [constellationOn, setConstellationOn] = useState(false)
+  useEffect(() => {
+    axios.get<{ constellation_enabled?: boolean }>('/api/settings')
+      .then(({ data }) => setConstellationOn(data.constellation_enabled === true))
+      .catch(() => setConstellationOn(false))
+  }, [])
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
@@ -601,10 +646,24 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   const selectedCompany = companies.find((c) => String(c.id) === companyFilter) ?? null
   // Single-company context: locked (from Companies view) or selected via dropdown
   const activeCompany = locked ?? selectedCompany
-  const visibleAssets = filterByCompany(assets, selectedCompany?.name ?? null)
-  const visibleHosts = selectedCompany
+  const activeDomain = domainSel && String(domainSel.companyId) === companyFilter ? domainSel.domain : ''
+  const visibleAssets = filterByDomain(filterByCompany(assets, selectedCompany?.name ?? null), activeDomain)
+  const companyHosts = selectedCompany
     ? allHosts.filter((h) => h.company === selectedCompany.name)
     : allHosts
+  const visibleHosts = activeDomain ? filterHostsByDomain(companyHosts, activeDomain) : companyHosts
+  const selectDomain = (companyName: string, domain: string) => {
+    const c = companies.find((x) => x.name === companyName)
+    if (!c) return
+    setCompanyFilter(String(c.id))
+    setDomainSel({ companyId: c.id, domain })
+  }
+  const selectCompanyByName = (companyName: string) => {
+    const c = companies.find((x) => x.name === companyName)
+    if (!c) return
+    setCompanyFilter(String(c.id))
+    setDomainSel(null)
+  }
   const isHostView = HOST_FILTERS.has(category)
   const filteredCompanies = selectedCompany ? [selectedCompany] : companies
 
@@ -699,9 +758,9 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   }
 
   // Cards reflect the selected company when filtered, global totals otherwise
-  const cardTotals = selectedCompany
+  const cardTotals = selectedCompany || activeDomain
     ? {
-        domains: filteredCompanies.flatMap((c) => c.domains).length,
+        domains: activeDomain ? 1 : filteredCompanies.flatMap((c) => c.domains).length,
         subdomains: visibleAssets.subdomains.length,
         ips: visibleAssets.ips.length,
         endpoints: visibleAssets.endpoints.length,
@@ -936,6 +995,18 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
               </button>
             </span>
           ) : null}
+          {activeDomain && (
+            <span className="chip bg-violet-50 text-violet-700 border-violet-200 inline-flex items-center gap-1.5 font-mono">
+              {activeDomain}
+              <button
+                onClick={() => setDomainSel(null)}
+                className="hover:text-violet-900 transition-colors"
+                title={t('dashboard.clearDomainFilter')}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )}
           <input
             type="text"
             value={search}
@@ -1106,7 +1177,17 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
           </div>
 
           {/* Analytics charts — same scope as the cards (global or filtered company) */}
-          <DashboardAnalytics companyId={selectedCompany?.id ?? null} />
+          <DashboardAnalytics companyId={selectedCompany?.id ?? null} domain={activeDomain || null} />
+
+          {constellationOn && (
+            <AttackSurfaceGraph
+              hosts={visibleHosts}
+              companies={filteredCompanies}
+              focusDomain={activeDomain || null}
+              onSelectCompany={selectCompanyByName}
+              onSelectDomain={selectDomain}
+            />
+          )}
 
           {totalAssets === 0 && visibleHosts.length === 0 && category !== 'companies' && category !== 'domains' ? (
             <div className="card text-center text-dark-500 py-12 text-sm">
@@ -1147,7 +1228,7 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
                 {category === 'companies' ? (
                   <CompaniesTable companies={filteredCompanies} search={search} onOpenCompany={onOpenCompany} />
                 ) : category === 'domains' ? (
-                  <DomainsTable companies={filteredCompanies} search={search} showCompany={!selectedCompany} />
+                  <DomainsTable companies={filteredCompanies} search={search} showCompany={!selectedCompany} activeDomain={activeDomain} onSelectDomain={selectDomain} />
                 ) : isHostView ? (
                   <HostTable
                     hosts={visibleHosts}

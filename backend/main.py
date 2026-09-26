@@ -676,7 +676,7 @@ SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hou
                  "tools_naabu", "tools_trufflehog",
                  "discovery_enabled", "vuln_scan_enabled",
                  "default_discover_interval_hours", "skip_discovery_default",
-                 "ai_domain_suggestions")
+                 "ai_domain_suggestions", "constellation_enabled")
 DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_DISCOVER_INTERVAL_HOURS = 720  # 30 days
@@ -753,6 +753,7 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "default_discover_interval_hours": discover_interval if isinstance(discover_interval, int) and discover_interval >= 1 else DEFAULT_DISCOVER_INTERVAL_HOURS,
         "skip_discovery_default": skip_discovery_default if isinstance(skip_discovery_default, bool) else False,
         "ai_domain_suggestions": ai_domain_suggestions if isinstance(ai_domain_suggestions, bool) else False,
+        "constellation_enabled": stored.get("constellation_enabled") is True,
         **{f"tools_{name}": flag for name, flag in tools.items()},
     }
 
@@ -3133,14 +3134,16 @@ async def company_rating_history(company_id: int):
 
 # ── Dashboard analytics (charts) ─────────────────────────────────────────────
 @app.get("/api/dashboard/analytics")
-async def dashboard_analytics(company_id: int | None = Query(default=None)):
+async def dashboard_analytics(company_id: int | None = Query(default=None), domain: str | None = Query(default=None)):
     """Aggregated chart data: findings by severity/category, per-company
     severity breakdown, cumulative surface timeline (asset first_seen), rating
     trend and remediation status. Scope: all companies, or one with
-    ?company_id="""
+    ?company_id=, or a single domain with ?domain= (within that scope)."""
     companies = await (Company.filter(id=company_id) if company_id else Company.all())
     comp_map = {c.id: c.name for c in companies}
     domains = await Domain.filter(company_id__in=list(comp_map)) if comp_map else []
+    if domain:
+        domains = [d for d in domains if d.domain.lower() == domain.strip().lower()]
     dom_to_company = {d.id: d.company_id for d in domains}
     domain_ids = list(dom_to_company)
 
@@ -4210,6 +4213,7 @@ class SettingsUpdateRequest(BaseModel):
     fanout_max_targets: int | None = None
     fanout_scope: str | None = None
     ai_domain_suggestions: bool | None = None
+    constellation_enabled: bool | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
     tools_katana: bool | None = None
@@ -4304,6 +4308,7 @@ async def update_settings(request: SettingsUpdateRequest):
         "fanout_max_targets": request.fanout_max_targets,
         "fanout_scope": request.fanout_scope,
         "ai_domain_suggestions": request.ai_domain_suggestions,
+        "constellation_enabled": request.constellation_enabled,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,
         "tools_katana": request.tools_katana,

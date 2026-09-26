@@ -934,6 +934,7 @@ export interface AppSettings {
   fanout_max_targets?: number
   fanout_scope?: 'new' | 'changed' | 'new_or_changed' | 'all_alive'
   ai_domain_suggestions?: boolean
+  constellation_enabled?: boolean
   agent_mode_default?: boolean
   auto_discover_domains?: boolean
   vuln_scan_enabled?: boolean
