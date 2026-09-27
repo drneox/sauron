@@ -113,7 +113,7 @@ def _org_names(domain: str) -> list[str]:
     """
     Extract the registered domain name using tldextract.
     Handles multi-part ccTLDs:
-      acme.edu.pe   → ['acme']
+      acme.edu.pe      → ['acme']
       api.example.com  → ['example', 'api']
       store.brand.co.uk → ['brand', 'store']
     """

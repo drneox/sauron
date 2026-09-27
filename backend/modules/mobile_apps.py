@@ -379,9 +379,10 @@ def run(domain: str, app_developers: list[dict] | None = None) -> dict[str, Any]
 
     # Confirmed official developers (per-domain setting): look up their catalog
     # directly and merge into the official list. A developer confirmed on one
-    # store is searched on the OTHER store too: companies publish under the same
-    # legal name on both (a bank's own payment app), but the generic brand search only finds
-    # apps whose title carries the brand.
+    # store is searched on the OTHER store too: a bank may publish its payments
+    # app under a different consumer brand, but the same legal developer name
+    # on both stores, and the generic brand search only finds apps whose title
+    # carries the brand.
     lookups: list[tuple[str, str, str | None]] = []
     seen_lookups: set[tuple[str, str]] = set()
     for dev in app_developers or []:

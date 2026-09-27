@@ -82,8 +82,8 @@ def _brand_variants(company_name: str) -> list[str]:
         variants.add("".join(words))               # no spaces
         if len(words) > 1:
             variants.add("-".join(words))          # hyphenated
-            # Distinctive words only: "grupo acme" must permute "acme",
-            # never the generic first word "grupo" (grupo.com is someone else's).
+            # Distinctive words only: "grupo acme" must permute "acme", never
+            # the generic first word "grupo" (grupo.com is someone else's).
             distinctive = [w for w in words if len(w) >= 3 and w not in _GENERIC_BRAND_WORDS]
             if distinctive:
                 variants.add(distinctive[0])

@@ -78,12 +78,9 @@ _STACK_HINTS = {
 }
 
 # Insurance-brand heuristic: seguros.txt is included when the domain is a
-# Peruvian TLD (.pe) or the brand label contains a well-known insurer marker.
+# Peruvian TLD (.pe) or the brand label contains a generic insurance word.
 # Deliberately simple and documented — refine when company context lands.
-_INSURANCE_MARKERS = (
-***REMOVED***
-    "seguro", "aseguradora",
-)
+_INSURANCE_MARKERS = ("seguro", "aseguradora")
 
 
 def _load_wordlist(name: str) -> list[str]:
