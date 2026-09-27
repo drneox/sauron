@@ -1404,9 +1404,9 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
         # persist it (not even as suspicious): it's review noise.
         if app_entry.get("llm_verdict") == "unrelated":
             continue
-        # Identity is store-scoped: "Instagram" on Google Play and "Instagram" on the App
-        # Store are DIFFERENT assets (the value carries a "store:" prefix that
-        # the API serializers strip before display).
+        # Identity is store-scoped: "Instagram" on Google Play and "Instagram" on
+        # the App Store are DIFFERENT assets (the value carries a "store:" prefix
+        # that the API serializers strip before display).
         store = app_entry.get("store") or "unknown"
         wanted[("app", f"{store}:{app_entry['name']}")] = {
             "name": app_entry["name"],

@@ -286,7 +286,7 @@ _LLM_SYSTEM_PROMPT = (
     "dominio de una empresa (y a veces su nombre legal) y una lista de apps móviles "
     "encontradas en las tiendas oficiales (App Store / Google Play) al buscar por la marca. "
     "OJO: la marca puede colisionar con empresas NO relacionadas que comparten la "
-    "palabra (ej. 'Banco Atlántico' de Ecuador NO es 'Atlántico Seguros' de Perú; "
+    "palabra (ej. 'Banco Atlántico' de un país NO es 'Atlántico Seguros' de otro; "
     "'Acme Telecom' NO es la universidad Acme). Usa el nombre legal si lo "
     "tienes y tu conocimiento del país/sector del dominio para distinguirlas. Para cada "
     "app decide un veredicto:\n"
