@@ -27,7 +27,7 @@ import random
 import string
 from typing import Any
 
-from modules.common import afetch, make_async_client
+from modules.common import afetch, make_async_client, user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -635,7 +635,7 @@ async def _run_async(domain: str) -> dict[str, Any]:
     limits = httpx.Limits(max_connections=25, max_keepalive_connections=10)
     async with make_async_client(
         timeout=httpx.Timeout(8.0),
-        headers={"User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)"},
+        headers={"User-Agent": user_agent()},
         limits=limits,
     ) as client:
         # Connectivity check – fall back to http

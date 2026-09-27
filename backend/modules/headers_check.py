@@ -6,7 +6,7 @@ import httpx
 import logging
 from typing import Any
 
-from modules.common import SSRFBlocked, fetch
+from modules.common import SSRFBlocked, fetch, user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def run(domain: str) -> dict[str, Any]:
             resp = fetch(
                 url,
                 timeout=10,
-                headers={"User-Agent": "ASM-Scanner/1.0"},
+                headers={"User-Agent": user_agent()},
             )
             result["url"] = str(resp.url)
             result["status_code"] = resp.status_code

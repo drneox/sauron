@@ -4,7 +4,7 @@ Shared HTTP layer for scanner modules.
 All outbound HTTP from scan modules should go through here:
 
 - make_client() / make_async_client(): preconfigured httpx clients
-  (UA "DumbAuditor/1.0", verify=False, follow_redirects=False). They pick a
+  (configurable UA — see user_agent() — verify=False, follow_redirects=False). They pick a
   proxy from modules.proxy_pool by default; pass proxy=None explicitly for
   requests that must NEVER go through a proxy (e.g. candidate-key
   verification in secret_verification).
@@ -25,8 +25,11 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+from contextvars import ContextVar
 from typing import Any
 from urllib.parse import urljoin, urlparse
+
+from contextvars import ContextVar
 
 import httpx
 
@@ -34,7 +37,35 @@ from modules import proxy_pool
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "DumbAuditor/1.0"
+DEFAULT_USER_AGENT = "DumbAuditor/1.0"
+MAX_USER_AGENT_LEN = 256
+
+# Per-scan value (set from Settings by main._run_scan). A ContextVar, like the
+# tool flags, so concurrent scan workers never see each other's value; threads
+# started with asyncio.to_thread inherit it.
+_user_agent_var: ContextVar[str | None] = ContextVar("asm_user_agent", default=None)
+
+
+def clean_user_agent(value: object) -> str | None:
+    """A usable User-Agent, or None. Printable ASCII only and single line: the
+    value ends up in an HTTP header, so CR/LF would allow header injection."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_USER_AGENT_LEN:
+        return None
+    if not all(32 <= ord(c) < 127 for c in value):
+        return None
+    return value
+
+
+def set_user_agent(value: object) -> None:
+    _user_agent_var.set(clean_user_agent(value))
+
+
+def user_agent() -> str:
+    """User-Agent for requests aimed at the scanned target."""
+    return _user_agent_var.get() or DEFAULT_USER_AGENT
 DEFAULT_MAX_BYTES = 2_000_000  # 2 MB
 MAX_REDIRECTS = 5
 
@@ -95,7 +126,7 @@ def make_client(proxy: str | None | object = _UNSET, timeout: float = 10, **kw) 
         proxy = proxy_pool.get_proxy()
     if proxy:
         kw["proxy"] = proxy
-    headers = {"User-Agent": USER_AGENT} | kw.pop("headers", {})
+    headers = {"User-Agent": user_agent()} | kw.pop("headers", {})
     return httpx.Client(
         verify=kw.pop("verify", False),
         follow_redirects=False,  # redirects are followed manually by fetch()
@@ -111,7 +142,7 @@ def make_async_client(proxy: str | None | object = _UNSET, timeout: float = 10, 
         proxy = proxy_pool.get_proxy()
     if proxy:
         kw["proxy"] = proxy
-    headers = {"User-Agent": USER_AGENT} | kw.pop("headers", {})
+    headers = {"User-Agent": user_agent()} | kw.pop("headers", {})
     return httpx.AsyncClient(
         verify=kw.pop("verify", False),
         follow_redirects=False,
@@ -158,7 +189,10 @@ def _materialized_headers(resp: httpx.Response) -> httpx.Headers:
     """Headers for the rebuilt response: the body we attach is already decoded
     and possibly truncated, so hop/encoding/length headers would be lies."""
     drop = {"content-encoding", "content-length", "transfer-encoding"}
-    return httpx.Headers({k: v for k, v in resp.headers.items() if k.lower() not in drop})
+    # Raw byte pairs: a header value with non-ASCII text (e.g. wordpress.org's
+    # "x-olaf: ⛄") cannot be re-encoded from str, and a dict would also collapse
+    # repeated headers (several Set-Cookie / Link lines).
+    return httpx.Headers([(k, v) for k, v in resp.headers.raw if k.lower().decode("latin-1") not in drop])
 
 
 async def _aread_limited(resp: httpx.Response, max_bytes: int) -> bytes:

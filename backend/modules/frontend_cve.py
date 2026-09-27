@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from packaging.version import InvalidVersion, Version
 
-from modules.common import afetch, make_async_client
+from modules.common import afetch, make_async_client, user_agent
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 TIMEOUT     = httpx.Timeout(15.0, connect=8.0)
@@ -277,7 +277,7 @@ async def _run_async(domain: str) -> dict[str, Any]:
         return make_async_client(
             timeout=TIMEOUT,
             verify=verify_arg,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; ASM-Scanner/1.0)"},
+            headers={"User-Agent": user_agent()},
         )
 
     async def _connect() -> tuple[httpx.Response | None, str | None]:

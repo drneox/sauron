@@ -1636,6 +1636,48 @@ def _build_nuclei(data: dict, styles: dict) -> list:
     return elems
 
 
+def _build_kev(data: dict, styles: dict) -> list:
+    matches = (data or {}).get("matches") or []
+    unverifiable = (data or {}).get("unverifiable") or []
+    if not matches and not unverifiable:
+        return []
+    elems: list = [_section_header("KNOWN EXPLOITED VULNERABILITIES (CISA KEV)", "🔥")]
+    elems.append(_spacer(0.2))
+    if matches:
+        hdr = [["CVE", "Technology", "Affected range", "Notes"]]
+        for m in matches:
+            notes = ["Ransomware campaigns"] if m.get("ransomware") else []
+            if m.get("due_date"):
+                notes.append(f"CISA due {m['due_date']}")
+            hdr.append([
+                Paragraph(_e(m.get("cve", "")), styles["small_mono"]),
+                Paragraph(_e(f"{m.get('technology', '')} {m.get('version', '')}"), styles["small"]),
+                Paragraph(_e(m.get("affected_range", "")), styles["small_mono"]),
+                Paragraph(_e(f"{m.get('name') or ''}. " + "; ".join(notes)), styles["small"]),
+            ])
+        t = Table(hdr, colWidths=[2.8 * cm, 3.6 * cm, 3.2 * cm, COL_W - 9.6 * cm])
+        t.setStyle(TableStyle([
+            ("BACKGROUND",    (0, 0), (-1, 0), C_BG_BAND),
+            ("TEXTCOLOR",     (0, 0), (-1, 0), colors.white),
+            ("GRID",          (0, 0), (-1, -1), 0.3, C_BORDER),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.white, C_BG_ROW_ALT]),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 5),
+            ("VALIGN",        (0, 0), (-1, -1), "TOP"),
+        ]))
+        elems.append(t)
+        elems.append(Paragraph(
+            "Versions come from the HTTP response; vendors may backport fixes without changing the number. "
+            "Verify the real build.", styles["small"]))
+    if unverifiable:
+        techs = ", ".join(u.get("technology", "") for u in unverifiable)
+        elems.append(Paragraph(f"Cannot verify (version not exposed): {_e(techs)}", styles["small"]))
+    elems.append(_spacer(0.3))
+    return elems
+
+
 def _build_mobile_apps(data: dict, styles: dict) -> list:
     if not data:
         return []
@@ -2080,6 +2122,7 @@ def generate_pdf(report: dict) -> bytes:
 
     # ── Vulnerability Scanning ──
     _safe_extend(story, "nuclei",      _build_nuclei,      mods.get("nuclei") or {}, styles)
+    _safe_extend(story, "kev",         _build_kev,         mods.get("kev") or {}, styles)
 
     # ── Reputation / Threat Intel ──
     _safe_extend(story, "breach",     _build_breach,     mods.get("breach") or {}, styles)

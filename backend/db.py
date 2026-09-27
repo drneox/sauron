@@ -139,6 +139,12 @@ class Finding(Model):
     fingerprint = fields.TextField()  # sha1(domain|module|normalized text)
     module = fields.CharField(max_length=64)
     text = fields.TextField()
+    # The specific host that produced this finding (a fanned-out host scan's
+    # target, e.g. a subdomain, or a subdomain_eval line's own bracketed host) —
+    # NOT always the same as `domain` above, which is the company's apex domain
+    # row the finding is filed under. Null when no single host applies (a
+    # domain-wide module, or an older finding recorded before this field existed).
+    host = fields.CharField(max_length=255, null=True)
     risk = fields.CharField(max_length=16)  # critical|high|medium|low|info
     category = fields.CharField(max_length=32, default="info")  # vulnerability|misconfiguration|exposure|info
     frameworks = fields.JSONField(default=list)  # e.g. ["NIST-CSF", "ISO-27001"]

@@ -36,3 +36,5 @@ Thumbs.db
 # ── Local tooling / runtime artifacts ─────────────────────────────────
 aerich.ini.local
 proxies.txt
+backend/modules/data/kev_cache.json
+backend/modules/data/nvd_cache.json

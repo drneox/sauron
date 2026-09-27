@@ -72,6 +72,7 @@ from modules import (
     api_exposure,
     wayback_secrets,
     nuclei_integration,
+    kev_check,
     subdomain_eval,
     smart_fuzz,
     ai_summary,
@@ -88,6 +89,9 @@ from modules import (
 
 from db import AppSetting, Asset, AssetHistory, Company, Domain, Endpoint, Finding, Scan, Schedule, Subdomain, User, close_db, init_db
 from modules import compliance
+from modules.common import (
+    DEFAULT_USER_AGENT, MAX_USER_AGENT_LEN, clean_user_agent, set_user_agent,
+)
 from scan_queue import ScanQueue
 from auth import (
     AUTH_ENABLED,
@@ -412,7 +416,7 @@ HOST_SCAN_MODULES = {
     "dns", "ssl", "tls", "headers", "cors", "cookies",
     "tech", "waf", "robots", "admin", "frontend_cve",
     "js_secrets", "secret_verification", "smart_fuzz", "blacklist",
-    "exposed", "api_exposure", "ports", "reverse_ip", "nuclei",
+    "exposed", "api_exposure", "ports", "reverse_ip", "nuclei", "kev",
 }
 
 # Every module the orchestrator can run, in execution order. Used by the
@@ -422,7 +426,7 @@ SCAN_MODULE_NAMES = [
     "cookies", "email", "tech", "mobile_apps", "waf", "robots", "admin",
     "frontend_cve", "js_secrets", "secret_verification", "smart_fuzz", "blacklist",
     "exposed", "breach", "cloud_storage", "api_exposure", "wayback", "ports",
-    "reverse_ip", "nuclei", "subdomain_eval",
+    "reverse_ip", "nuclei", "kev", "subdomain_eval",
 ]
 
 # Modules runnable standalone via a manual module scan (kind="module").
@@ -441,7 +445,7 @@ SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hou
                  "tools_naabu", "tools_trufflehog",
                  "discovery_enabled", "vuln_scan_enabled",
                  "default_discover_interval_hours", "skip_discovery_default",
-                 "ai_domain_suggestions", "constellation_enabled")
+                 "ai_domain_suggestions", "constellation_enabled", "user_agent")
 DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_DISCOVER_INTERVAL_HOURS = 720  # 30 days
@@ -519,6 +523,8 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "skip_discovery_default": skip_discovery_default if isinstance(skip_discovery_default, bool) else False,
         "ai_domain_suggestions": ai_domain_suggestions if isinstance(ai_domain_suggestions, bool) else False,
         "constellation_enabled": stored.get("constellation_enabled") is True,
+        # "" = the built-in default; anything invalid also falls back to it
+        "user_agent": clean_user_agent(stored.get("user_agent")) or "",
         **{f"tools_{name}": flag for name, flag in tools.items()},
     }
 
@@ -532,6 +538,7 @@ def _settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
     ai_configured = bool(os.getenv("AI_API_KEY", "").strip())
     proxy_on = proxy_pool.enabled()
     return settings | {
+        "user_agent_default": DEFAULT_USER_AGENT,
         "ai": {
             "configured": ai_configured,
             "model": os.getenv("AI_MODEL", "gpt-4o-mini") if ai_configured else None,
@@ -571,18 +578,23 @@ def _chained_eval_step(scan_id: str, domain: str, subdomains_result: dict,
     cap = settings.get("chain_eval_max_targets") or DEFAULT_CHAIN_EVAL_MAX
     entries = (subdomains_result or {}).get("subdomains") or []
     current = [s["subdomain"] for s in entries if isinstance(s, dict) and s.get("subdomain")]
+    active = [s["subdomain"] for s in entries
+              if isinstance(s, dict) and s.get("status") == "active" and s.get("subdomain")]
     if settings.get("chain_eval_scope", "new") == "all":
         # Re-evaluate every DNS-active subdomain each scan, capped.
-        targets = [s["subdomain"] for s in entries
-                   if isinstance(s, dict) and s.get("status") == "active" and s.get("subdomain")][:cap]
+        candidates = active
     else:
         prev = SCANS[scan_id].get("prev_subdomains") or []
         if prev:
-            targets = [s for s in current if s not in set(prev)][:cap]
+            known = set(prev)
+            candidates = [s for s in current if s not in known]
         else:
             # First scan: cap over the alive (DNS-active) subdomains only.
-            targets = [s["subdomain"] for s in entries
-                       if isinstance(s, dict) and s.get("status") == "active" and s.get("subdomain")][:cap]
+            candidates = active
+    # The cap keeps the likeliest-weak hosts (stable sort: ties keep list order).
+    entry_by_host = {s["subdomain"]: s for s in entries if isinstance(s, dict) and s.get("subdomain")}
+    candidates = sorted(candidates, key=lambda h: -host_priority(h, domain, entry_by_host.get(h)))
+    targets = candidates[:cap]
     if not targets:
         return subdomain_eval.skipped("no new subdomains")
     SCANS[scan_id]["current_module"] = "subdomain_eval"
@@ -607,6 +619,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     # Snapshot tools_* flags for this scan (context-local — safe with
     # SCAN_WORKERS > 1); modules consult them via tools_runner.tool_enabled().
     tools_runner.set_tool_flags(settings)
+    set_user_agent((settings or {}).get("user_agent"))
     results: dict[str, Any] = {}
     # Handoff channel for full candidate key values extracted by js_secrets.
     # js_secrets.pop("_raw") fills it; secret_verification reads it via closure.
@@ -665,6 +678,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         ("ports",         port_scan.run),
         ("reverse_ip",    reverse_ip.run),
         ("nuclei",        nuclei_integration.run),
+        ("kev",           kev_check.run),
     ]
     tier1_modules = [
         ("secret_verification", _secret_verification_run),   # needs js_secrets
@@ -723,7 +737,11 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
             logger.info(f"[{scan_id}] Module {name} disabled in settings — skipped")
             results[name] = {"status": "skipped", "findings": [], "risk": "low"}
             return
+        if SCANS[scan_id].get("stop_requested"):
+            return
         async with semaphore:
+            if SCANS[scan_id].get("stop_requested"):
+                return  # waited for a slot while the stop arrived: don't start now
             SCANS[scan_id].setdefault("current_modules", set()).add(name)
             SCANS[scan_id]["current_module"] = name  # best-effort single-name label; see current_modules for the full set
             start = time.time()
@@ -759,7 +777,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
                     logger.exception(f"[{scan_id}] Incremental asset upsert failed after {name}")
             # Chained evaluation: right after enumeration, give the newly discovered
             # subdomains a light eval (full scans only; see _chained_eval_step).
-            if name == "subdomains" and kind == "full":
+            if name == "subdomains" and kind == "full" and not SCANS[scan_id].get("stop_requested"):
                 results["subdomain_eval"] = await asyncio.to_thread(
                     _chained_eval_step, scan_id, domain, results["subdomains"], settings, enabled_modules)
 
@@ -773,6 +791,10 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         raise _ScanStopped()
     await asyncio.gather(*(run_module(name, func) for name, func in tier1_modules))
 
+    if SCANS[scan_id].get("stop_requested"):
+        logger.info(f"[{scan_id}] Stop requested — halting before the summary")
+        raise _ScanStopped()
+
     # Aggregate summary — each step degrades independently instead of killing the scan
     all_findings = []
     for mod_name, mod_result in results.items():
@@ -783,10 +805,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
             all_findings.append({
                 "module": mod_name,
                 "finding": finding,
-                # Informational findings carry no risk of their own; without this
-                # they'd inherit the module's worst risk (e.g. "Email hosted on
-                # Google Workspace" shown as HIGH).
-                "risk": "info" if category == "info" else mod_result.get("risk", "low"),
+                "risk": finding_risk(mod_result.get("risk", "low"), category),
                 "category": category,
             })
 
@@ -828,6 +847,8 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     # Optional AI layer — after the scorecard, never part of the score,
     # and never allowed to break the scan. Discovery scans skip it; host
     # scans only get it in agent_mode.
+    if SCANS[scan_id].get("stop_requested"):
+        raise _ScanStopped()
     if kind == "full" or (kind == "host" and SCANS[scan_id].get("agent_mode")):
         try:
             result["ai_summary"] = await asyncio.to_thread(ai_summary.run, result)
@@ -840,6 +861,8 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     # Agent findings are appended to result["findings"] with module="agent"
     # and may raise scorecard.overall_risk, but NEVER the numeric score/grade
     # (the scorecard remains purely deterministic).
+    if SCANS[scan_id].get("stop_requested"):
+        raise _ScanStopped()
     if SCANS[scan_id].get("agent_mode"):
         SCANS[scan_id].update({"current_module": "agent", "progress": 99, "agent_steps": []})
         try:
@@ -903,6 +926,19 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
 # ── Persistence & diffing (async — runs in the queue worker context) ───────────
 async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None) -> None:
     # The Scan row already exists (created as "queued" at enqueue time).
+    # A scan stopped while queued was already persisted as interrupted (see
+    # stop_scan): the worker must not flip it back to "running".
+    stopped_row = await Scan.get_or_none(id=scan_id)
+    if SCANS.get(scan_id, {}).get("stop_requested") or (stopped_row and stopped_row.status == "interrupted"):
+        if stopped_row and stopped_row.status != "interrupted":
+            await Scan.filter(id=scan_id).update(
+                status="interrupted", current_module=None,
+                result={"interrupted": {"was": "queued", "reason": "stopped by the user before it started",
+                                        "at": datetime.now(timezone.utc).isoformat(), "requeued_as": None}},
+            )
+        SCANS.pop(scan_id, None)
+        logger.info(f"[{scan_id}] Skipped (stopped while queued)")
+        return
     await Scan.filter(id=scan_id).update(status="running", current_module=None)
     # Resolve the domain row up-front so the scanner thread can push
     # incremental asset upserts back onto this loop after each module.
@@ -1058,6 +1094,26 @@ def _finding_fingerprint(domain: str, module: str, text: str) -> str:
     return hashlib.sha1(f"{domain}|{module}|{normalized}".encode("utf-8")).hexdigest()
 
 
+# subdomain_eval prefixes each sub-finding with the specific host it came from
+# ("[carreras.example.com] Path discovered: ..."), unlike every other module,
+# which reports against the scan's own target — see _finding_host.
+_BRACKETED_HOST_RE = re.compile(
+    r"^\[([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+)\] "
+)
+
+
+def _finding_host(module: str, text: str, scan_target: str | None) -> str | None:
+    """The specific host a finding is about, when it can be told apart from
+    `dom.domain` (the apex row it's filed under) — e.g. a fanned-out host scan's
+    target, or a subdomain_eval line's own bracketed host. None when a finding
+    isn't about one particular host (a "[secret verification] ..." line, or
+    subdomain_eval's own summary lines)."""
+    if module == "subdomain_eval":
+        m = _BRACKETED_HOST_RE.match(text)
+        return m.group(1) if m else None
+    return scan_target or None
+
+
 async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
     """Upsert the scan's aggregated findings as persistent Finding rows and
     auto-resolve whatever disappeared. Full scans upsert AND sweep; host and
@@ -1068,6 +1124,7 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
     if kind not in ("full", "host", "module"):
         return
     now = datetime.now(timezone.utc)
+    scan_target = result.get("domain")
     seen_fps: set[str] = set()
     for f in result.get("findings") or []:
         if not isinstance(f, dict):
@@ -1076,15 +1133,21 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         if not text:
             continue
         module = f.get("module") or "unknown"
-        fp = _finding_fingerprint(dom.domain, module, text)
+        host = _finding_host(module, text, scan_target)
+        # The fingerprint identifies a finding by the host it is actually
+        # about (falling back to the apex domain when no host is known) so
+        # that two different fanned-out hosts reporting the identical text
+        # (e.g. both missing the same header) are tracked as separate findings
+        # instead of collapsing into one row that only remembers the last host.
+        fp = _finding_fingerprint(host or dom.domain, module, text)
         seen_fps.add(fp)
-        risk = f.get("risk") if f.get("risk") in RISK_ORDER or f.get("risk") == "info" else "low"
+        risk = f.get("risk") if f.get("risk") in FINDING_RISK_LEVELS else "low"
         category = f.get("category") or _finding_category(module, f.get("finding"))
         frameworks = compliance.frameworks_for(module, text)
         existing = await Finding.get_or_none(domain_id=dom.id, fingerprint=fp)
         if existing is None:
             await Finding.create(
-                domain_id=dom.id, fingerprint=fp, module=module, text=text,
+                domain_id=dom.id, fingerprint=fp, module=module, text=text, host=host,
                 risk=risk, category=category, frameworks=frameworks,
                 status="open",
                 first_seen_scan_id=scan_id, last_seen_scan_id=scan_id,
@@ -1096,6 +1159,7 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         existing.risk = risk
         existing.category = category
         existing.frameworks = frameworks
+        existing.host = host
         if existing.status == "fixed":
             # A finding that was resolved (manually or automatically) is back
             # in the scan output — reopen it.
@@ -1202,7 +1266,19 @@ TECH_CATEGORIES = {
     "Google Analytics": "analytics", "Google Tag Manager": "analytics",
     "Facebook Pixel": "analytics",
     "jQuery": "library", "Bootstrap": "library", "Font Awesome": "library",
+    "Tomcat": "server", "Kestrel": "server", "Gunicorn": "server", "Caddy": "server",
+    "Envoy": "server", "Amazon S3": "server",
+    "Laravel": "framework", "Django": "framework", "Java": "language",
+    "Azure Front Door": "cdn", "Akamai": "cdn", "Vercel": "cdn", "Netlify": "cdn",
+    "TYPO3": "cms", "PrestaShop": "cms",
 }
+
+
+def _tech_category(name: str) -> str:
+    """WordPress plugins/themes arrive as "<slug> (WP plugin)"."""
+    if name.endswith((" (WP plugin)", " (WP theme)")):
+        return "plugin"
+    return TECH_CATEGORIES.get(name, "other")
 
 
 def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str], dict]:
@@ -1285,9 +1361,14 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
     for path, source in _extract_endpoints(result).items():
         wanted[("endpoint", path)] = {"source": source}
 
+    tech_versions = tech_mod.get("versions") or {}
     for tech in tech_mod.get("technologies") or []:
         if isinstance(tech, str) and tech:
-            wanted[("technology", tech)] = {"category": TECH_CATEGORIES.get(tech, "other")}
+            meta = {"category": _tech_category(tech)}
+            # Only when known, so assets without a version keep their metadata unchanged
+            if tech_versions.get(tech):
+                meta["version"] = tech_versions[tech]
+            wanted[("technology", tech)] = meta
 
     for panel in admin_mod.get("found") or []:
         if not isinstance(panel, dict):
@@ -1513,7 +1594,7 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
     cap = settings.get("fanout_max_targets") or DEFAULT_FANOUT_MAX
     in_flight = {s.get("domain") for s in SCANS.values() if s.get("status") in ("queued", "running")}
     # The cap must not starve anyone: hosts that never had a deep scan go first,
-    # then the least recently scanned. (Alphabetical order would re-pick the same
+    # then the least recently scanned. (A fixed order would re-pick the same
     # first N hosts on every full scan and never reach the rest.)
     last_deep: dict[str, datetime] = {}
     for target, done_at in await Scan.filter(
@@ -1522,7 +1603,13 @@ async def _fanout_host_scans(scan_id: str, dom: Domain, result: dict) -> None:
         if done_at and (target not in last_deep or done_at > last_deep[target]):
             last_deep[target] = done_at
     oldest = datetime.min.replace(tzinfo=timezone.utc)
-    ordered = sorted(targets, key=lambda h: (h in last_deep, last_deep.get(h, oldest), h))
+    # Among equally (un)scanned hosts the likeliest-weak ones go first (non-prod
+    # environments, admin-like names, hosts the light evaluation flagged).
+    entry_by_host = {s["subdomain"]: s for s in entries if isinstance(s, dict) and s.get("subdomain")}
+    eval_rows = ((result.get("modules") or {}).get("subdomain_eval") or {}).get("evaluated") or []
+    eval_by_host = {e["subdomain"]: e for e in eval_rows if isinstance(e, dict) and e.get("subdomain")}
+    prio = {h: host_priority(h, dom.domain, entry_by_host.get(h), eval_by_host.get(h)) for h in targets}
+    ordered = sorted(targets, key=lambda h: (h in last_deep, last_deep.get(h, oldest), -prio[h], h))
     queued = 0
     for host in ordered:
         if queued >= cap:
@@ -2258,6 +2345,7 @@ async def list_scans(domain: str | None = Query(default=None)):
                 "completed_at": s.get("completed_at"),
                 "grade": None,
                 "kind": s.get("kind", "full"),
+                "stopping": bool(s.get("stop_requested")),
             }
     return list(rows.values())
 
@@ -2273,7 +2361,18 @@ async def stop_scan(scan_id: str):
             raise HTTPException(status_code=409, detail="Scan is not running")
         scan["stop_requested"] = True
         logger.info(f"[{scan_id}] Stop requested by user")
-        return {"message": "Stop requested — the scan will halt after the current module"}
+        if scan["status"] == "queued":
+            # Not started: nothing to wait for. Persist it now; the worker skips
+            # it when it surfaces (waiting there could take hours behind a long queue).
+            await Scan.filter(id=scan_id).update(
+                status="interrupted", current_module=None,
+                result={"interrupted": {"was": "queued", "reason": "stopped by the user before it started",
+                                        "at": datetime.now(timezone.utc).isoformat(), "requeued_as": None}},
+            )
+            SCANS.pop(scan_id, None)
+            return {"message": "Scan stopped", "stopped": True}
+        return {"message": "Stop requested — no new module will start; the ones already running finish first",
+                "stopped": False}
     row = await Scan.get_or_none(id=scan_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found")
@@ -2731,6 +2830,7 @@ def _serialize_finding(rec: Finding) -> dict:
         "id": rec.id,
         "module": rec.module,
         "text": rec.text,
+        "host": rec.host,
         "risk": rec.risk,
         "category": rec.category,
         "frameworks": rec.frameworks or [],
@@ -3116,7 +3216,8 @@ async def _build_company_assets(company: Company) -> dict:
         elif asset.type == "endpoint":
             grouped["endpoints"].append(base | {"source": meta.get("source") or ""})
         elif asset.type == "technology":
-            grouped["technologies"].append(base | {"category": meta.get("category") or "other"})
+            grouped["technologies"].append(base | {"category": meta.get("category") or "other",
+                                                    "version": meta.get("version")})
         elif asset.type == "admin_panel":
             grouped["admin_panels"].append(base | {"http_status": meta.get("http_status")})
         elif asset.type == "exposed_file":
@@ -3526,7 +3627,8 @@ async def _collect_company_hosts(company: Company) -> dict:
         if a.type == "technology":
             key = apex_of_domain.get(a.domain_id, "")
             if key in hosts:
-                hosts[key]["technologies"].append({"name": a.value, "category": meta.get("category") or "other"})
+                hosts[key]["technologies"].append({"name": a.value, "category": meta.get("category") or "other",
+                                                   "version": meta.get("version")})
                 host_assets.setdefault(key, []).append(a)
         elif a.type == "endpoint":
             key = apex_of_domain.get(a.domain_id, "")
@@ -3585,6 +3687,11 @@ async def _collect_company_hosts(company: Company) -> dict:
                 merged.setdefault((p.get("port"), p.get("service")), p)
         host["open_ports"] = sorted(merged.values(), key=lambda p: p["port"])
         host["ips"].sort()
+    # Flag risky services once, from port_scan's own list, so the UI colors ports
+    # by what they are instead of painting every open port the same.
+    for host in hosts.values():
+        host["open_ports"] = [{**p, "risky": p.get("port") in port_scan.FLAGGED_PORTS,
+                                  "severity": port_scan.port_severity(p.get("port"))} for p in host["open_ports"]]
 
     # 7) risk per host + final ordering (riskiest first, then alphabetical)
     for key, host in hosts.items():
@@ -3744,7 +3851,7 @@ def _assets_csv_rows(payload: dict) -> list[dict]:
         rows.append(row)
     for item in assets.get("technologies", []):
         row = _base("technology", item)
-        row["detail"] = item.get("category") or ""
+        row["detail"] = " ".join(x for x in (item.get("category"), f"v{item['version']}" if item.get("version") else "") if x)
         rows.append(row)
     for item in assets.get("admin_panels", []):
         rows.append(_base("admin_panel", item))
@@ -3991,10 +4098,6 @@ def _parse_period_bound(value: str, end: bool) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _grade_of_score(score: float) -> str:
-    return "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
-
-
 @app.get("/api/companies/{company_id}/changes")
 async def company_changes(company_id: int, from_: str = Query(alias="from"), to: str = Query()):
     """What changed in a company between two DATES, independent of which scans
@@ -4200,6 +4303,7 @@ class SettingsUpdateRequest(BaseModel):
     fanout_scope: str | None = None
     ai_domain_suggestions: bool | None = None
     constellation_enabled: bool | None = None
+    user_agent: str | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
     tools_katana: bool | None = None
@@ -4255,6 +4359,16 @@ class SettingsUpdateRequest(BaseModel):
             raise ValueError("default_discover_interval_hours must be >= 1")
         return v
 
+    @field_validator("user_agent")
+    @classmethod
+    def validate_user_agent(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if v and clean_user_agent(v) is None:
+            raise ValueError(f"user_agent must be single-line printable ASCII, up to {MAX_USER_AGENT_LEN} characters")
+        return v  # "" resets to the default
+
     @field_validator("smart_fuzz_max_requests")
     @classmethod
     def validate_fuzz_max(cls, v: int | None) -> int | None:
@@ -4295,6 +4409,7 @@ async def update_settings(request: SettingsUpdateRequest):
         "fanout_scope": request.fanout_scope,
         "ai_domain_suggestions": request.ai_domain_suggestions,
         "constellation_enabled": request.constellation_enabled,
+        "user_agent": request.user_agent,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,
         "tools_katana": request.tools_katana,

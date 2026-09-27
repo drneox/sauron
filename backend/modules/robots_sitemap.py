@@ -8,7 +8,7 @@ from xml.etree import ElementTree
 from typing import Any
 from urllib.parse import urljoin
 
-from modules.common import fetch
+from modules.common import fetch, user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ SENSITIVE_PATH_PATTERNS = re.compile(
 def _fetch(url: str) -> tuple[int, str]:
     try:
         r = fetch(url, timeout=TIMEOUT,
-                  headers={"User-Agent": "Mozilla/5.0 (compatible; DumbAuditor/1.0)"})
+                  headers={"User-Agent": user_agent()})
         return r.status_code, r.text
     except Exception:
         return 0, ""

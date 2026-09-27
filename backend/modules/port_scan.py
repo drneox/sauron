@@ -64,6 +64,27 @@ RISKY_PORTS = {
     9300, 11211, 15672, 27017, 28017, 25, 111,
 }
 
+# Every port that produces a finding: the risky set plus SSH, which is reported
+# on its own (see run()) but kept out of RISKY_PORTS so a single SSH does not trip
+# the "2+ risky ports => high" rule. The UI colors ports from this set.
+FLAGGED_PORTS = RISKY_PORTS | {22}
+
+# Inherent severity of exposing each flagged port, for coloring inventories.
+# (The module's own risk still depends on the whole scan: two or more risky
+# ports raise it to high, and an unauthenticated service makes it critical.)
+CRITICAL_PORTS = {23, 2375}    # Telnet, Docker API
+MEDIUM_PORTS = {22}            # SSH: remote administration reachable from the internet
+
+
+def port_severity(port: int) -> str | None:
+    """critical / high / medium for a flagged port, None for anything else."""
+    if port in CRITICAL_PORTS:
+        return "critical"
+    if port in MEDIUM_PORTS:
+        return "medium"
+    return "high" if port in RISKY_PORTS else None
+
+
 # Probes to detect unauthenticated access on specific ports
 # (port, probe_bytes_or_None, unauth_marker_in_response)
 _UNAUTH_PROBES: dict[int, tuple[bytes | None, str]] = {

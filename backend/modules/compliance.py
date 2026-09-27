@@ -30,7 +30,7 @@ FRAMEWORKS = ("NIST-CSF", "ISO-27001", "PCI-DSS", "CIS")
 #   - Attack-surface exposure (open ports, admin panels, API docs): NIST-CSF
 #     ID.AM / CIS inventory & control.
 #   - Breach/leak evidence: NIST-CSF + ISO-27001 + PCI-DSS.
-#   - Pure inventory modules (whois, dns, subdomains, tech, waf, reverse_ip,
+#   - Pure inventory modules (whois, dns, subdomains, tech, reverse_ip,
 #     mobile_apps) intentionally map to nothing — inventory is not a control
 #     gap by itself.
 MODULE_FRAMEWORKS: dict[str, list[str]] = {
@@ -50,6 +50,7 @@ MODULE_FRAMEWORKS: dict[str, list[str]] = {
     "wayback": ["NIST-CSF", "ISO-27001", "PCI-DSS"],
     "breach": ["NIST-CSF", "ISO-27001", "PCI-DSS"],
     "nuclei": ["NIST-CSF", "ISO-27001", "CIS"],
+    "kev": ["NIST-CSF", "ISO-27001", "PCI-DSS", "CIS"],
     "frontend_cve": ["NIST-CSF", "ISO-27001", "CIS"],
     "smart_fuzz": ["NIST-CSF", "ISO-27001", "PCI-DSS"],
     "cloud_storage": ["NIST-CSF", "ISO-27001", "PCI-DSS"],
@@ -61,6 +62,9 @@ MODULE_FRAMEWORKS: dict[str, list[str]] = {
 # ADD). Applied on top of the module mapping, so e.g. an ssl finding that
 # mentions encryption also picks up PCI-DSS.
 TEXT_RULES: list[tuple[re.Pattern, list[str]]] = [
+    # A public web application with no WAF/CDN in front: PCI-DSS 6.4 asks for one
+    # (or code review) on public-facing apps.
+    (re.compile(r"^no waf"), ["NIST-CSF", "PCI-DSS"]),
     (re.compile(r"\b(secret|api[_ -]?key|token|credential|password|private key)\b"),
      ["ISO-27001", "PCI-DSS"]),
     (re.compile(r"\b(tls|ssl|encrypt|cipher|certificate)\b"),

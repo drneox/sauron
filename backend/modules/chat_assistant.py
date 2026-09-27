@@ -6,6 +6,7 @@ against Tortoise; the assistant never writes to the DB. LLM config comes from
 AI_API_KEY / AI_BASE_URL / AI_MODEL (same env as ai_summary / agent_scan); the
 endpoint reports "not configured" when AI_API_KEY is missing.
 """
+import asyncio
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import httpx
 
 from db import Asset, Company, Domain, Scan
 from modules.ai_summary import _endpoint_and_headers
+from modules import ip_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,11 @@ SYSTEM_PROMPT = (
     "no está en ninguna empresa, busca también en los dominios sin empresa.\n"
     "- NUNCA muestres claves, tokens ni contraseñas completas: si un dato parece "
     "un secreto, muéstralo redactado (primeros 4 + *** + últimos 3).\n"
+    "- Para preguntas sobre una IP concreta (¿es compartida de verdad o de proveedor?, "
+    "¿quién es el dueño?, ¿qué hosts la usan?) usa ip_lookup y explica sus señales: "
+    "dueño de la red, respuesta a un nombre inexistente, puertos abiertos y hosts por "
+    "empresa. Varias empresas en una IP de borde de un proveedor NO implica relación "
+    "entre ellas; sé prudente y di qué evidencia lo respalda.\n"
     "- Cita fechas en formato corto (YYYY-MM-DD).\n"
     "- Formato: markdown simple (negritas y bullets con '- '); NUNCA uses tablas."
 )
@@ -273,6 +280,55 @@ async def _tool_emails_exposed(domain: str) -> dict:
     }
 
 
+IP_HOSTS_PER_COMPANY = 15
+
+
+async def _tool_ip_lookup(ip: str) -> dict:
+    """Everything known about one IP: which hosts of which companies resolve to
+    it, who owns the network, how it answers an unknown hostname and which ports
+    are open. Only IPs already in the inventory are probed."""
+    ip = (ip or "").strip()
+    if not ip_lookup.is_public_ip(ip):
+        return {"error": f"'{ip}' is not a public IP address", "companies": []}
+    hosts = await Asset.filter(type="subdomain", metadata__contains={"ips": [ip]}).prefetch_related("domain__company")
+    ip_rows = await Asset.filter(type="ip", value=ip).prefetch_related("domain__company")
+    if not hosts and not ip_rows:
+        return {"error": f"The IP {ip} is not in any company's inventory", "companies": []}
+
+    by_company: dict[str, dict] = {}
+    for a in hosts:
+        company = a.domain.company.name if a.domain.company else "(no company)"
+        entry = by_company.setdefault(company, {"company": company, "domains": set(), "hosts": []})
+        entry["domains"].add(a.domain.domain)
+        entry["hosts"].append(a.value)
+    for a in ip_rows:  # companies that know the IP even when no host row lists it
+        company = a.domain.company.name if a.domain.company else "(no company)"
+        entry = by_company.setdefault(company, {"company": company, "domains": set(), "hosts": []})
+        entry["domains"].add(a.domain.domain)
+    companies = [{
+        "company": e["company"],
+        "domains": sorted(e["domains"]),
+        "hosts_total": len(e["hosts"]),
+        "hosts": sorted(e["hosts"])[:IP_HOSTS_PER_COMPANY],
+    } for e in sorted(by_company.values(), key=lambda e: -len(e["hosts"]))]
+
+    owner, probe, ports = await asyncio.gather(
+        asyncio.to_thread(ip_lookup.owner_of, ip),
+        asyncio.to_thread(ip_lookup.probe_unknown_host, ip),
+        asyncio.to_thread(ip_lookup.open_ports, ip),
+    )
+    return {
+        "ip": ip,
+        "company_count": len(companies),
+        "hosts_total": len(hosts),
+        "companies": companies,
+        "owner": owner,
+        "probe_unknown_hostname": probe,
+        "open_ports": ports,
+        "reading": ip_lookup.verdict_hint(owner, probe, ports, len(companies)),
+    }
+
+
 TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict]]] = {
     "list_companies": _tool_list_companies,
     "company_assets": _tool_company_assets,
@@ -280,6 +336,7 @@ TOOL_FUNCS: dict[str, Callable[..., Awaitable[dict]]] = {
     "list_scans": _tool_list_scans,
     "findings": _tool_findings,
     "emails_exposed": _tool_emails_exposed,
+    "ip_lookup": _tool_ip_lookup,
 }
 
 TOOLS = [
@@ -351,6 +408,18 @@ TOOLS = [
                     "risk": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
                     "days_back": {"type": "integer"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ip_lookup",
+            "description": "Deep look at ONE IP from the inventory: hosts (subdomains) of every company that resolve to it, network owner (ASN/name/reverse DNS), how it answers a hostname that cannot exist there (a shared CDN/front-door edge replies with the platform's generic response and platform headers; a VM replies with its own default site), open web/admin ports, and a cautious reading. Use it to tell a really shared server from vendor edge infrastructure.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ip": {"type": "string", "description": "IPv4/IPv6 address as shown in the inventory"}},
+                "required": ["ip"],
             },
         },
     },

@@ -42,6 +42,7 @@ RUN set -e; \
       url="https://github.com/projectdiscovery/${tool}/releases/download/v${ver}/${tool}_${ver}_linux_${ARCH}.zip"; \
       if curl -fsSL -o "/tmp/${tool}.zip" "$url" \
          && unzip -q -o "/tmp/${tool}.zip" -d /usr/local/bin "$tool"; then \
+        if [ "$tool" = "httpx" ]; then mv -f /usr/local/bin/httpx /usr/local/bin/pdhttpx; fi; \
         echo "installed ${tool} ${ver} (${ARCH})"; \
       else \
         echo "WARNING: failed to install ${tool} ${ver} from $url"; \
@@ -56,9 +57,9 @@ RUN set -e; \
       echo "WARNING: failed to install trufflehog ${TRUFFLEHOG_VERSION} from $th_url"; \
     fi; \
     rm -f /tmp/trufflehog.tar.gz; \
-    chmod +x /usr/local/bin/subfinder /usr/local/bin/httpx /usr/local/bin/katana \
+    chmod +x /usr/local/bin/subfinder /usr/local/bin/pdhttpx /usr/local/bin/katana \
              /usr/local/bin/naabu /usr/local/bin/trufflehog 2>/dev/null || true; \
-    for tool in subfinder httpx katana naabu trufflehog; do \
+    for tool in subfinder pdhttpx katana naabu trufflehog; do \
       if which "$tool" >/dev/null 2>&1; then \
         echo "OK: $tool -> $(which "$tool")"; \
       else \
@@ -66,10 +67,17 @@ RUN set -e; \
       fi; \
     done; \
     subfinder -version 2>&1 | head -1 || true; \
-    httpx -version 2>&1 | head -1 || true; \
+    pdhttpx -version 2>&1 | head -1 || true; \
     katana -version 2>&1 | head -1 || true; \
     naabu -version 2>&1 | head -1 || true; \
     trufflehog --version 2>&1 | head -1 || true
+
+# nuclei templates baked into the image (~85MB). Without this the first scan
+# after every rebuild downloaded them at run time, which used up the module's
+# whole time budget and left nuclei "timed_out" with no findings. nuclei still
+# refreshes them incrementally on later runs.
+RUN nuclei -update-templates 2>&1 | tail -2; \
+    test -d /root/nuclei-templates || echo "WARNING: nuclei templates not preinstalled"
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt

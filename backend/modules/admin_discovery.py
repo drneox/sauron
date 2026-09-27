@@ -18,7 +18,7 @@ import logging
 import re
 from typing import Any
 
-from modules.common import afetch, fetch, is_same_path_redirect, make_async_client
+from modules.common import afetch, fetch, is_same_path_redirect, make_async_client, user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ async def _run_async(base_url: str) -> tuple[list[dict], list[dict]]:
     sem = asyncio.Semaphore(CONCURRENCY)
     async with make_async_client(
         timeout=TIMEOUT,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; DumbAuditor/1.0)"},
+        headers={"User-Agent": user_agent()},
     ) as client:
         baseline = await _calibrate(client, base_url)
 

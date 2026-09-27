@@ -5,7 +5,7 @@ Identifies web application firewalls and CDN providers from headers and response
 import logging
 from typing import Any
 
-from modules.common import fetch, make_client
+from modules.common import fetch, make_client, user_agent
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ def run(domain: str) -> dict[str, Any]:
             url = f"{scheme}://{domain}"
             try:
                 resp = fetch(url, client=client,
-                             headers={"User-Agent": "Mozilla/5.0 (compatible; DumbAuditor/1.0)"})
+                             headers={"User-Agent": user_agent()})
                 if resp.status_code < 500:
                     cands = _check_waf(dict(resp.headers), resp.text, resp.status_code)
                     for c in cands:

@@ -26,7 +26,7 @@ from urllib.parse import urljoin
 import httpx
 
 from modules import discovery_sources
-from modules.common import afetch, make_async_client
+from modules.common import afetch, make_async_client, user_agent
 
 TIMEOUT     = httpx.Timeout(10.0, connect=6.0)
 CONCURRENCY = 10
@@ -189,7 +189,7 @@ async def _run_async(domain: str) -> dict[str, Any]:
     # Try HTTPS first, fall back to HTTP
     async with make_async_client(
         timeout=httpx.Timeout(5.0, connect=4.0), verify=ssl_ctx,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; ASM-Scanner/1.0)"},
+        headers={"User-Agent": user_agent()},
     ) as probe:
         try:
             r = await afetch(base_https, client=probe)
@@ -200,7 +200,7 @@ async def _run_async(domain: str) -> dict[str, Any]:
     sem = asyncio.Semaphore(CONCURRENCY)
     async with make_async_client(
         timeout=TIMEOUT, verify=ssl_ctx,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; ASM-Scanner/1.0)"},
+        headers={"User-Agent": user_agent()},
     ) as client:
         swagger_tasks = [
             _probe_swagger(client, sem, base_url, path, label, sev)

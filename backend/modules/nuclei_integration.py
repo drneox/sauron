@@ -27,13 +27,48 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from modules import tech_fingerprint
+from modules.common import user_agent
+
 logger = logging.getLogger(__name__)
 
 NUCLEI_TIMEOUT = 120   # seconds max for the entire nuclei run
+NUCLEI_TECH_TIMEOUT = 180  # a stack-specific run has thousands more templates (WordPress alone: ~1.700)
 NUCLEI_BINARY  = "nuclei"
 
 # Templates to run (passed as -t flags, comma-separated)
 _TEMPLATE_TAGS = "cve,exposure,misconfig,takeover,default-login"
+
+# Detected technology → nuclei template tags. The generic tags above already
+# reach many CVEs, but stack-specific templates (plugins, themes, admin
+# panels, version checks) only run when the stack is known to be present.
+TECH_TAGS: dict[str, tuple[str, ...]] = {
+    "WordPress": ("wordpress", "wp-plugin", "wp-theme"),
+    "Joomla": ("joomla",),
+    "Drupal": ("drupal",),
+    "Magento": ("magento",),
+    "Nginx": ("nginx",),
+    "Apache": ("apache",),
+    "PHP": ("php",),
+    "IIS": ("iis",),
+    "Tomcat": ("tomcat",),
+    "Laravel": ("laravel",),
+    "Next.js": ("nextjs",),
+    "Ghost": ("ghost",),
+    "TYPO3": ("typo3",),
+    "PrestaShop": ("prestashop",),
+}
+
+
+def tech_tags(technologies: list[str]) -> list[str]:
+    """Extra nuclei tags for the detected stack (deduplicated, stable order)."""
+    tags: list[str] = []
+    for tech in technologies or []:
+        for tag in TECH_TAGS.get(tech, ()):
+            if tag not in tags:
+                tags.append(tag)
+    return tags
+
 
 # Nuclei severity → our risk mapping
 _SEV_MAP = {
@@ -97,7 +132,10 @@ def _parse_jsonl(output: str, domain: str) -> list[dict]:
     return findings
 
 
-async def _run_nuclei_async(domain: str, binary: str) -> dict[str, Any]:
+async def _run_nuclei_async(domain: str, binary: str, extra_tags: list[str] | None = None) -> dict[str, Any]:
+    extra_tags = extra_tags or []
+    tags = ",".join([_TEMPLATE_TAGS, *extra_tags])
+    timeout = NUCLEI_TECH_TIMEOUT if extra_tags else NUCLEI_TIMEOUT
     target = f"https://{domain}"
     with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
         out_file = f.name
@@ -105,7 +143,7 @@ async def _run_nuclei_async(domain: str, binary: str) -> dict[str, Any]:
     cmd = [
         binary,
         "-target",    target,
-        "-tags",      _TEMPLATE_TAGS,
+        "-tags",      tags,
         "-severity",  "low,medium,high,critical",
         "-json-export", out_file,
         "-silent",
@@ -115,6 +153,7 @@ async def _run_nuclei_async(domain: str, binary: str) -> dict[str, Any]:
         "-concurrency", "10",
         "-rate-limit", "50",
         "-retries",   "0",
+        "-H",         f"User-Agent: {user_agent()}",
     ]
 
     logger.info(f"Running nuclei against {domain}: {' '.join(cmd)}")
@@ -127,13 +166,13 @@ async def _run_nuclei_async(domain: str, binary: str) -> dict[str, Any]:
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=NUCLEI_TIMEOUT
+                proc.communicate(), timeout=timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.communicate()
-            logger.warning(f"Nuclei timed out after {NUCLEI_TIMEOUT}s for {domain}")
-            return _build_result([], domain, timed_out=True)
+            logger.warning(f"Nuclei timed out after {timeout}s for {domain}")
+            return _build_result([], domain, timed_out=True, tech_tags=extra_tags)
     except Exception as exc:
         return {
             "status": "error", "error": str(exc),
@@ -150,10 +189,11 @@ async def _run_nuclei_async(domain: str, binary: str) -> dict[str, Any]:
         pass
 
     items = _parse_jsonl(raw, domain)
-    return _build_result(items, domain)
+    return _build_result(items, domain, tech_tags=extra_tags)
 
 
-def _build_result(items: list[dict], domain: str, timed_out: bool = False) -> dict[str, Any]:
+def _build_result(items: list[dict], domain: str, timed_out: bool = False,
+                  tech_tags: list[str] | None = None) -> dict[str, Any]:
     by_severity: dict[str, int] = {}
     for item in items:
         sev = item["severity"]
@@ -180,6 +220,7 @@ def _build_result(items: list[dict], domain: str, timed_out: bool = False) -> di
         "by_severity":     by_severity,
         "risk":            risk,
         "findings":        findings_text,
+        "tech_tags":       tech_tags or [],
     }
 
 
@@ -196,7 +237,13 @@ def run(domain: str) -> dict[str, Any]:
             "findings":       [],
         }
     try:
-        return asyncio.run(_run_nuclei_async(domain, binary))
+        # Stack-specific templates only when the stack is known; a failed
+        # detection just means the generic run.
+        try:
+            technologies = tech_fingerprint.run(domain).get("technologies") or []
+        except Exception:
+            technologies = []
+        return asyncio.run(_run_nuclei_async(domain, binary, tech_tags(technologies)))
     except Exception as exc:
         return {
             "status": "error", "error": str(exc),

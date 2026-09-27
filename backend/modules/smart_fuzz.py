@@ -31,7 +31,7 @@ from typing import Any
 
 import httpx
 
-from modules.common import afetch, is_same_path_redirect, make_async_client
+from modules.common import afetch, is_same_path_redirect, make_async_client, user_agent
 from modules.exposed_files import (
     SEVERITY_ORDER,
     _body_hash,
@@ -403,7 +403,7 @@ async def _run_async(
     stats = {"requests": 0, "errors": 0, "waf_pages": 0, "wall_403": 0, "wall_redirect": 0}
     async with make_async_client(
         timeout=httpx.Timeout(_PROBE_TIMEOUT),
-        headers={"User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)"},
+        headers={"User-Agent": user_agent()},
         limits=limits,
     ) as client:
         try:

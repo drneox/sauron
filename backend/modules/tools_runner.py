@@ -29,6 +29,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from modules.common import user_agent
+
 logger = logging.getLogger(__name__)
 
 TOOLS = ("subfinder", "httpx", "katana", "naabu", "trufflehog")
@@ -60,8 +62,38 @@ def tool_enabled(name: str) -> bool:
     return _tool_flags.get().get(name, True)
 
 
+_PD_HTTPX_CACHE: dict[str, bool] = {}
+
+
+def _is_pd_httpx(path: str) -> bool:
+    """True when `path` is ProjectDiscovery's httpx and not the Python httpx CLI
+    (which pip installs under the same name and prints a pip hint on -version)."""
+    if path not in _PD_HTTPX_CACHE:
+        try:
+            proc = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=10)
+            out = (proc.stdout + proc.stderr).lower()
+            _PD_HTTPX_CACHE[path] = "projectdiscovery" in out or "current version" in out
+        except Exception:
+            _PD_HTTPX_CACHE[path] = False
+    return _PD_HTTPX_CACHE[path]
+
+
 def which_tool(name: str) -> str | None:
-    """Path to the binary, or None. Fixed install locations first, then PATH."""
+    """Path to the binary, or None. Fixed install locations first, then PATH.
+
+    ProjectDiscovery's httpx is installed as `pdhttpx` because the Python httpx
+    package owns the name `httpx`; a plain `httpx` is accepted only if it is
+    verifiably ProjectDiscovery's (e.g. a host install via brew)."""
+    if name == "httpx":
+        found = which_tool("pdhttpx")
+        if found:
+            return found
+        plain = _which_plain("httpx")
+        return plain if plain and _is_pd_httpx(plain) else None
+    return _which_plain(name)
+
+
+def _which_plain(name: str) -> str | None:
     for directory in _extra_dirs():
         candidate = Path(directory) / name
         if candidate.exists() and os.access(candidate, os.X_OK):
@@ -166,7 +198,8 @@ async def httpx_probe(hosts: list[str]) -> dict[str, Any]:
         return {"status": "ok", "hosts": [], "alive_count": 0}
     stdout, stderr, rc = await asyncio.to_thread(
         run_tool, "httpx",
-        ["-silent", "-json", "-tech-detect", "-status-code", "-title", "-timeout", "8", "-threads", "20"],
+        ["-silent", "-json", "-tech-detect", "-status-code", "-title", "-timeout", "8", "-threads", "20",
+         "-H", f"User-Agent: {user_agent()}"],
         HTTPX_TIMEOUT, "\n".join(hosts),
     )
     probed = []
@@ -204,7 +237,8 @@ async def katana_crawl(domain: str, depth: int = 2, max_pages: int = 50) -> dict
         ["-u", domain, "-silent", "-jsonl", "-d", str(depth),
          "-jc",                    # parse JS bundles for endpoints (SPAs!)
          "-kf", "robotstxt", "-kf", "sitemapxml",  # mine robots.txt + sitemap.xml
-         "-c", "10", "-timeout", "10", "-max-response-size", "2097152"],
+         "-c", "10", "-timeout", "10", "-max-response-size", "2097152",
+         "-H", f"User-Agent: {user_agent()}"],
         KATANA_TIMEOUT,
     )
     urls: list[str] = []
