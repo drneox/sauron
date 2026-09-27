@@ -21,7 +21,7 @@ import {
 } from 'lucide-react'
 import { AssetSummary, Company } from '../types/report'
 import { getToken } from '../auth'
-import { LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
+import { CategoryAxisTick, CategoryChartTooltip, LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
 
 interface FindingRow {
   module: string
@@ -110,9 +110,10 @@ const gradeChipBig = (g: string | null) =>
 
 function CategoryBreakdownCard({ totals }: { totals: CategoryTotals }) {
   const { t } = useTranslation()
+  const labelOf = (key: string) => t(`companyReport.category.${key}`)
   const chartData = (['vulnerability', 'misconfiguration', 'exposure'] as const).map((key) => ({
     key,
-    label: t(`companyReport.category.${key}`),
+    label: labelOf(key),
     value: totals[key],
   }))
   const total = chartData.reduce((sum, c) => sum + c.value, 0)
@@ -134,10 +135,17 @@ function CategoryBreakdownCard({ totals }: { totals: CategoryTotals }) {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chartData} layout="vertical" margin={{ top: 0, right: 16, bottom: 0, left: 0 }}>
               <XAxis type="number" allowDecimals={false} tick={{ fontSize: 11, fill: '#6b7280' }} tickLine={false} axisLine={{ stroke: '#e6e9f0' }} />
-              <YAxis type="category" dataKey="label" width={110} tick={{ fontSize: 11, fill: '#1c2740' }} tickLine={false} axisLine={false} />
+              <YAxis
+                type="category"
+                dataKey="key"
+                width={110}
+                tickLine={false}
+                axisLine={false}
+                tick={(p) => <CategoryAxisTick {...p} labelOf={labelOf} />}
+              />
               <Tooltip
                 cursor={{ fill: '#f8fafc' }}
-                contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #e6e9f0', borderRadius: 8, fontSize: 12 }}
+                content={(p) => <CategoryChartTooltip {...p} labelOf={labelOf} />}
               />
               <Bar dataKey="value" radius={[0, 4, 4, 0]} barSize={18} isAnimationActive={false}>
                 {chartData.map((c) => (

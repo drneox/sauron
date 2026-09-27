@@ -13,12 +13,16 @@ import {
   Undo2,
 } from 'lucide-react'
 import { Company } from '../types/report'
-import { PAGE_SIZE, Pager, RiskBadge } from './ui'
+import { LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
 
 export interface RemediationFinding {
   id: number
   module: string
   text: string
+  /** The specific host the finding is about (may be a subdomain of `domain`
+   * below, when it came from a fanned-out host scan); null when no single
+   * host applies (e.g. a secret-verification note). */
+  host: string | null
   risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category: string
   frameworks: string[]
@@ -58,6 +62,7 @@ interface Props {
 }
 
 type StatusFilter = 'all' | 'open' | 'accepted' | 'fixed'
+type CategoryFilter = 'all' | 'vulnerability' | 'misconfiguration' | 'exposure' | 'info'
 
 type Row = RemediationFinding & { domain: string }
 
@@ -77,6 +82,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState<StatusFilter>('open')
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
   const [page, setPage] = useState(1)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
@@ -100,7 +106,12 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     return data.domains.flatMap((d) => d.findings.map((f) => ({ ...f, domain: d.domain })))
   }, [data])
 
-  const filtered = rows.filter((r) => filter === 'all' || r.status === filter)
+  const filtered = rows.filter((r) => (filter === 'all' || r.status === filter)
+    && (categoryFilter === 'all' || r.category === categoryFilter))
+  const categoryCounts = rows.reduce<Record<string, number>>((acc, r) => {
+    if (filter === 'all' || r.status === filter) acc[r.category] = (acc[r.category] ?? 0) + 1
+    return acc
+  }, {})
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   const updateStatus = async (row: Row, status: 'accepted' | 'fixed' | 'open') => {
@@ -141,6 +152,14 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     { key: 'open', label: t('remediation.status.open') },
     { key: 'accepted', label: t('remediation.status.accepted') },
     { key: 'fixed', label: t('remediation.status.fixed') },
+  ]
+
+  const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
+    { key: 'all', label: t('remediation.filterAll') },
+    { key: 'vulnerability', label: t('remediation.category.vulnerability') },
+    { key: 'misconfiguration', label: t('remediation.category.misconfiguration') },
+    { key: 'exposure', label: t('remediation.category.exposure') },
+    { key: 'info', label: t('remediation.category.info') },
   ]
 
   const th = 'text-left text-[10px] font-semibold text-dark-500 uppercase tracking-wider px-3 py-2'
@@ -186,26 +205,48 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
       {error && <div className="card border-red-200 bg-red-50 text-red-700 text-sm">{error}</div>}
 
       {/* Status filter */}
-      <div className="flex items-center gap-1.5">
-        {FILTERS.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => { setFilter(f.key); setPage(1) }}
-            className={clsx(
-              'text-xs px-3 py-1.5 border rounded-lg transition-colors duration-150',
-              filter === f.key
-                ? 'bg-cyber-50 border-cyber-400 text-cyber-700 font-medium'
-                : 'bg-white hover:bg-dark-900 border-dark-700 text-dark-200',
-            )}
-          >
-            {f.label}
-            {data && f.key !== 'all' && (
-              <span className="ml-1.5 font-mono text-[10px] text-dark-500">
-                {f.key === 'open' ? data.totals.open : f.key === 'accepted' ? data.totals.accepted : data.totals.fixed}
-              </span>
-            )}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <div className="flex items-center gap-1.5">
+          {FILTERS.map((f) => (
+            <button
+              key={f.key}
+              onClick={() => { setFilter(f.key); setPage(1) }}
+              className={clsx(
+                'text-xs px-3 py-1.5 border rounded-lg transition-colors duration-150',
+                filter === f.key
+                  ? 'bg-cyber-50 border-cyber-400 text-cyber-700 font-medium'
+                  : 'bg-white hover:bg-dark-900 border-dark-700 text-dark-200',
+              )}
+            >
+              {f.label}
+              {data && f.key !== 'all' && (
+                <span className="ml-1.5 font-mono text-[10px] text-dark-500">
+                  {f.key === 'open' ? data.totals.open : f.key === 'accepted' ? data.totals.accepted : data.totals.fixed}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1.5">
+          {CATEGORY_FILTERS.map((f) => (
+            <button
+              key={f.key}
+              title={f.key === 'all' ? undefined : t(`categoryHelp.${f.key}`, { defaultValue: '' })}
+              onClick={() => { setCategoryFilter(f.key); setPage(1) }}
+              className={clsx(
+                'text-xs px-3 py-1.5 border rounded-lg transition-colors duration-150',
+                categoryFilter === f.key
+                  ? 'bg-violet-50 border-violet-400 text-violet-700 font-medium'
+                  : 'bg-white hover:bg-dark-900 border-dark-700 text-dark-200',
+              )}
+            >
+              {f.label}
+              {f.key !== 'all' && (
+                <span className="ml-1.5 font-mono text-[10px] text-dark-500">{categoryCounts[f.key] ?? 0}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {loading && !data && (
@@ -250,19 +291,30 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                       </td>
                       <td className="px-3 py-2"><RiskBadge risk={row.risk} /></td>
                       <td className="px-3 py-2">
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setCategoryFilter(row.category as CategoryFilter); setPage(1) }}
+                          title={t(`categoryHelp.${row.category}`, { defaultValue: '' })}
+                          className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 whitespace-nowrap cursor-help hover:bg-violet-50 hover:text-violet-700 hover:border-violet-300"
+                        >
                           {t(`remediation.category.${row.category}`, { defaultValue: row.category })}
-                        </span>
+                        </button>
                       </td>
                       <td className="px-3 py-2 text-xs text-dark-200 max-w-md">
-                        <span className="line-clamp-2">{row.text}</span>
+                        <span className="line-clamp-2">
+                          <LinkifyText text={row.text} baseUrl={`https://${row.host ?? row.domain}`} />
+                        </span>
                       </td>
                       <td className="px-3 py-2">
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 font-mono whitespace-nowrap">
                           {row.module}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-xs font-mono text-dark-300 whitespace-nowrap">{row.domain}</td>
+                      <td className="px-3 py-2 text-xs font-mono text-dark-300 whitespace-nowrap">
+                        {row.host && row.host !== row.domain ? (
+                          <span title={t('remediation.hostVsDomain', { domain: row.domain })}>{row.host}</span>
+                        ) : row.domain}
+                      </td>
                       <td className="px-3 py-2">
                         <div className="flex flex-wrap gap-1">
                           {(row.frameworks ?? []).map((fw) => (
@@ -318,7 +370,15 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                       <tr key={`${row.id}-detail`} className="bg-dark-900/30">
                         <td colSpan={readOnly ? 10 : 11} className="px-6 py-3">
                           <div className="text-xs space-y-1.5">
-                            <p className="text-dark-200 leading-relaxed">{row.text}</p>
+                            <p className="text-dark-200 leading-relaxed">
+                              <LinkifyText text={row.text} baseUrl={`https://${row.host ?? row.domain}`} />
+                            </p>
+                            {row.host && (
+                              <p className="text-dark-500">
+                                {t('remediation.col.host')}: <span className="font-mono text-dark-300">{row.host}</span>
+                                {row.host !== row.domain && <span> ({t('remediation.hostVsDomain', { domain: row.domain })})</span>}
+                              </p>
+                            )}
                             <div className="flex flex-wrap gap-x-6 gap-y-1 text-dark-500">
                               <span>{t('remediation.col.firstSeen')}: <span className="font-mono">{row.first_seen_at ? new Date(row.first_seen_at).toLocaleString() : '—'}</span></span>
                               <span>{t('remediation.col.lastSeen')}: <span className="font-mono">{row.last_seen_at ? new Date(row.last_seen_at).toLocaleString() : '—'}</span></span>

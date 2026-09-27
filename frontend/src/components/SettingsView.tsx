@@ -10,6 +10,7 @@ import {
   Bot,
   Clock,
   Cloud,
+  Fingerprint,
   GitFork,
   Globe,
   KeyRound,
@@ -33,7 +34,7 @@ const MODULE_GROUPS: { key: string; icon: LucideIcon; modules: string[] }[] = [
   { key: 'network', icon: Network, modules: ['ports', 'ssl', 'tls', 'waf'] },
   { key: 'web', icon: Globe, modules: ['headers', 'cors', 'cookies', 'tech', 'frontend_cve', 'api_exposure', 'admin'] },
   { key: 'secrets', icon: KeyRound, modules: ['exposed', 'js_secrets', 'secret_verification', 'wayback'] },
-  { key: 'cloud', icon: Cloud, modules: ['cloud_storage', 'breach', 'nuclei'] },
+  { key: 'cloud', icon: Cloud, modules: ['cloud_storage', 'breach', 'nuclei', 'kev'] },
   { key: 'email', icon: Mail, modules: ['email'] },
 ]
 
@@ -62,6 +63,7 @@ const MODULE_LABELS: Record<string, string> = {
   cloud_storage: 'Cloud Storage',
   breach: 'Breaches & Leaks',
   nuclei: 'Nuclei Templates',
+  kev: 'Known Exploited (KEV)',
   email: 'Email Security',
   mobile_apps: 'Mobile Apps',
   reverse_ip: 'Reverse IP',
@@ -121,6 +123,8 @@ export default function SettingsView() {
   const [error, setError] = useState('')
   const [stepsInput, setStepsInput] = useState('')
   const [savingSteps, setSavingSteps] = useState(false)
+  const [uaInput, setUaInput] = useState('')
+  const [savingUa, setSavingUa] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -129,6 +133,7 @@ export default function SettingsView() {
         if (cancelled) return
         setSettings(data)
         setStepsInput(String(data.agent_default_steps ?? ''))
+        setUaInput(data.user_agent ?? '')
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err, t('settings.loadError')))
@@ -189,6 +194,27 @@ export default function SettingsView() {
     } catch (err) {
       setSettings(prev)
       setError(errorMessage(err, t('settings.intervalError')))
+    }
+  }
+
+  // "" restores the built-in default. Same rule as the backend: one line of printable ASCII.
+  const saveUserAgent = async (value: string) => {
+    if (!settings) return
+    const trimmed = value.trim()
+    if (trimmed && (trimmed.length > 256 || !/^[\x20-\x7e]+$/.test(trimmed))) {
+      setError(t('settings.userAgentInvalid'))
+      return
+    }
+    setSavingUa(true)
+    try {
+      const { data } = await axios.put<AppSettings>('/api/settings', { user_agent: trimmed })
+      setSettings(data)
+      setUaInput(data.user_agent ?? '')
+      setError('')
+    } catch (err) {
+      setError(errorMessage(err, t('settings.userAgentError')))
+    } finally {
+      setSavingUa(false)
     }
   }
 
@@ -501,6 +527,42 @@ export default function SettingsView() {
                 <span className="text-xs text-dark-500">{t('settings.fanoutScopeHint')}</span>
               </div>
             </div>
+          </SectionCard>
+
+          {/* Scanner identity: the User-Agent sent to scanned targets */}
+          <SectionCard title={t('settings.userAgentTitle')} icon={<Fingerprint />}>
+            <p className="text-xs text-dark-500 leading-relaxed mb-3">{t('settings.userAgentDesc')}</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={uaInput}
+                onChange={(e) => setUaInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveUserAgent(uaInput) }}
+                placeholder={settings.user_agent_default ?? ''}
+                maxLength={256}
+                spellCheck={false}
+                className="flex-1 min-w-[280px] bg-white border border-dark-700 rounded-lg px-3 py-1.5 text-sm font-mono text-dark-200 placeholder:text-dark-600 focus:outline-none focus:border-cyber-500 focus:ring-2 focus:ring-cyber-500/20 transition-colors duration-150"
+              />
+              <button
+                onClick={() => saveUserAgent(uaInput)}
+                disabled={savingUa || uaInput.trim() === (settings.user_agent ?? '')}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t('settings.userAgentSave')}
+              </button>
+              <button
+                onClick={() => saveUserAgent('')}
+                disabled={savingUa || !(settings.user_agent ?? '')}
+                className="btn-secondary disabled:opacity-50"
+              >
+                {t('settings.userAgentReset')}
+              </button>
+            </div>
+            <p className="text-[11px] text-dark-500 mt-2">
+              {settings.user_agent
+                ? t('settings.userAgentActive')
+                : t('settings.userAgentDefaultInUse', { value: settings.user_agent_default ?? '' })}
+            </p>
           </SectionCard>
 
           {/* Dashboard: optional visualizations */}

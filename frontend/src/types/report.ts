@@ -208,6 +208,7 @@ export interface EmailResult {
 export interface TechResult {
   status: string
   technologies: string[]
+  versions?: Record<string, string>
   server: string | null
   powered_by: string | null
   cookies: { name: string; secure: boolean; httponly: boolean; samesite: string | null }[]
@@ -337,6 +338,29 @@ export interface NucleiResult {
   by_severity: Record<string, number>
   risk: RiskLevel
   findings: string[]
+}
+
+// Known exploited vulnerabilities (CISA KEV, version-verified against NVD)
+export interface KevMatch {
+  cve: string
+  technology: string
+  version: string
+  name: string | null
+  affected_range: string
+  date_added: string | null
+  due_date: string | null
+  ransomware: boolean
+  required_action: string | null
+}
+
+export interface KevResult {
+  status: string
+  matches: KevMatch[]
+  unverifiable: { technology: string; candidates: number; reason: string }[]
+  unverified: string[]
+  risk: RiskLevel
+  findings: string[]
+  error?: string
 }
 
 // Breach / Leaks
@@ -784,6 +808,7 @@ export interface EndpointAsset extends AssetBase {
 
 export interface TechnologyAsset extends AssetBase {
   category: string
+  version?: string | null
 }
 
 export interface AdminPanelAsset extends AssetBase {
@@ -826,8 +851,8 @@ export type WithCompany<T> = T & { company?: string }
 // ACTIVO = host (apex domain | subdomain | ip); everything else is an attribute.
 export type HostKind = 'domain' | 'subdomain' | 'ip'
 
-export interface HostTechnology { name: string; category: string }
-export interface HostPort { port: number; service: string | null }
+export interface HostTechnology { name: string; category: string; version?: string | null }
+export interface HostPort { port: number; service: string | null; risky?: boolean; severity?: 'critical' | 'high' | 'medium' | null }
 export interface HostEndpoint { path: string; source: string }
 export interface HostAdminPanel { url: string; http_status: number | null; severity: string | null }
 export interface HostExposedFile { path: string; risk: RiskLevel; url: string | null; description: string | null }
@@ -937,6 +962,8 @@ export interface AppSettings {
   fanout_scope?: 'new' | 'changed' | 'new_or_changed' | 'all_alive'
   ai_domain_suggestions?: boolean
   constellation_enabled?: boolean
+  user_agent?: string
+  user_agent_default?: string
   agent_mode_default?: boolean
   auto_discover_domains?: boolean
   vuln_scan_enabled?: boolean
@@ -1134,6 +1161,7 @@ export interface ScanReport {
     api_exposure?: ApiExposureResult
     wayback?: WaybackSecretsResult
     nuclei?: NucleiResult
+    kev?: KevResult
   }
 }
 

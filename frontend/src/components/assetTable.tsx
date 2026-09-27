@@ -18,7 +18,7 @@ import {
   LlmVerdict,
   WithCompany,
 } from '../types/report'
-import { RiskBadge } from './ui'
+import { RiskBadge, pathUrl } from './ui'
 import { BadgeCheck, Check, ExternalLink, Trash2 } from 'lucide-react'
 
 export type AssetCategory = AssetCategoryKey
@@ -105,6 +105,19 @@ function SeenCells({ asset }: { asset: AssetRow }) {
       </td>
     </>
   )
+}
+
+// Where a path was found: a JS file URL becomes a link to that file.
+export function SourceChip({ source, className }: { source: string; className: string }) {
+  if (/^https?:\/\//i.test(source)) {
+    return (
+      <a href={source} target="_blank" rel="noopener noreferrer" title={source}
+         className={clsx(className, 'hover:underline max-w-[220px] truncate inline-block align-middle')}>
+        {source.replace(/^https?:\/\//i, '')}
+      </a>
+    )
+  }
+  return <span className={className}>{source}</span>
 }
 
 export function LinkValueCell({ asset, href, extra }: { asset: AssetRow; href?: string | null; extra?: React.ReactNode }) {
@@ -209,11 +222,16 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
     }
   }
 
+  const [removedIds, setRemovedIds] = useState<Set<number>>(new Set())
+
   const reviewApp = async (a: WithCompany<AppAsset>, action: 'approve' | 'reject') => {
     if (a.id == null) return
     if (action === 'reject' && !confirm(t('assets.rejectAppConfirm', { name: a.value }))) return
     try {
       await axios.post(`/api/assets/${a.id}/review`, { action })
+      // The row's own domain is already deleted server-side; hide it now instead of
+      // waiting for onChanged's full company-wide reload (visibly slow with many companies).
+      if (action === 'reject') setRemovedIds((prev) => new Set(prev).add(a.id!))
       onChanged?.()
     } catch (err: unknown) {
       const msg = axios.isAxiosError(err)
@@ -350,13 +368,11 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
         <tbody className="divide-y divide-dark-800">
           {rows.length === 0 ? emptyRow(5 + extraCol) : rows.map((a) => (
             <tr key={`${a.company ?? ''}:${a.domain}${a.value}`} className="hover:bg-dark-800/40">
-              <ValueCell asset={a} />
+              <LinkValueCell asset={a} href={pathUrl(a.domain, a.value)} />
               <CompanyCell asset={a} show={showCompany} />
               <td className={td}>{a.domain}</td>
               <td className={td}>
-                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium border bg-purple-50 text-purple-700 border-purple-200">
-                  {a.source}
-                </span>
+                <SourceChip source={a.source} className="text-[11px] px-2 py-0.5 rounded-full font-medium border bg-purple-50 text-purple-700 border-purple-200" />
               </td>
               <SeenCells asset={a} />
             </tr>
@@ -374,6 +390,7 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
           <tr>
             <th className={th}>{t('assets.col.technology')}</th>
             <th className={th}>{t('assets.col.category')}</th>
+            <th className={th}>{t('assets.col.version')}</th>
             <CompanyTh show={showCompany} />
             <th className={th}>{t('assets.col.domain')}</th>
             <th className={th}>{t('assets.col.firstSeen')}</th>
@@ -381,7 +398,7 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
           </tr>
         </thead>
         <tbody className="divide-y divide-dark-800">
-          {rows.length === 0 ? emptyRow(5 + extraCol) : rows.map((a) => (
+          {rows.length === 0 ? emptyRow(6 + extraCol) : rows.map((a) => (
             <tr key={`${a.company ?? ''}:${a.domain}:${a.value}`} className="hover:bg-dark-800/40">
               <ValueCell asset={a} />
               <td className={td}>
@@ -389,6 +406,7 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
                   {a.category}
                 </span>
               </td>
+              <td className={`${td} font-mono text-xs`}>{a.version ?? <span className="text-dark-600">—</span>}</td>
               <CompanyCell asset={a} show={showCompany} />
               <td className={td}>{a.domain}</td>
               <SeenCells asset={a} />
@@ -431,7 +449,7 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
   if (category === 'apps') {
     // Same app discovered under several domains of the company → show once
     const seenApps = new Set<string>()
-    const rows = (assets?.apps ?? []).filter(match).filter((a) => {
+    const rows = (assets?.apps ?? []).filter(match).filter((a) => !(a.id != null && removedIds.has(a.id))).filter((a) => {
       const key = `${a.store}:${a.value}`
       if (seenApps.has(key)) return false
       seenApps.add(key)
@@ -587,7 +605,7 @@ export function AssetTable({ category, assets, search, showCompany = false, doma
       <tbody className="divide-y divide-dark-800">
         {rows.length === 0 ? emptyRow(5 + extraCol) : rows.map((a) => (
           <tr key={`${a.company ?? ''}:${a.domain}${a.value}`} className="hover:bg-dark-800/40">
-            <ValueCell asset={a} />
+            <LinkValueCell asset={a} href={pathUrl(a.domain, a.value)} />
             <CompanyCell asset={a} show={showCompany} />
             <td className={td}>{a.domain}</td>
             <td className={td}><RiskBadge risk={a.risk} /></td>

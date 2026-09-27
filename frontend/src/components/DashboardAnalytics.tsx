@@ -20,7 +20,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { SectionCard } from './ui'
+import { SectionCard, CategoryAxisTick, CategoryChartTooltip } from './ui'
 import { BarChart3 } from 'lucide-react'
 
 const SEV_COLORS: Record<string, string> = {
@@ -76,7 +76,8 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
     .filter(([, v]) => v > 0)
     .map(([name, value]) => ({ name, value }))
   const catData = Object.entries(data.findings_by_category)
-    .map(([name, value]) => ({ name, value }))
+    .map(([name, value]) => ({ name, key: name, value }))
+  const catLabel = (key: string) => t(`companyReport.category.${key}`, { defaultValue: key })
   const surfaceKeys = Array.from(new Set(
     data.surface_timeline.flatMap((row) => Object.keys(row).filter((k) => k !== 'date')),
   ))
@@ -120,8 +121,13 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={catData} layout="vertical">
                 <XAxis type="number" tick={chartText} />
-                <YAxis type="category" dataKey="name" width={110} tick={chartText} />
-                <Tooltip />
+                <YAxis
+                  type="category"
+                  dataKey="key"
+                  width={110}
+                  tick={(p) => <CategoryAxisTick {...p} labelOf={catLabel} fill={chartText.fill} />}
+                />
+                <Tooltip content={(p) => <CategoryChartTooltip {...p} labelOf={catLabel} />} />
                 <Bar dataKey="value" radius={[0, 4, 4, 0]}>
                   {catData.map((c) => <Cell key={c.name} fill={CAT_COLORS[c.name]} />)}
                 </Bar>

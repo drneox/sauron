@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
@@ -31,7 +31,7 @@ import {
 import { HostTable, HostFilter, TaggedHost } from './hostTable'
 import { downloadFromApi, LinkifyText, RiskBadge } from './ui'
 import AddAppModal from './AddAppModal'
-import AttackSurfaceGraph from './AttackSurfaceGraph'
+import AttackSurfaceGraph, { type IpGroup } from './AttackSurfaceGraph'
 import RatingTrendCard from './RatingTrend'
 import DashboardAnalytics from './DashboardAnalytics'
 import PortfolioSection from './PortfolioSection'
@@ -582,6 +582,9 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   const [scanInProgress, setScanInProgress] = useState(false)
   // Domain filter: scoped to the company it was picked in, so switching company drops it
   const [domainSel, setDomainSel] = useState<{ companyId: number; domain: string } | null>(null)
+  // Node picked on the node map: narrows the host list to that host, or to every
+  // host resolving to that IP (across companies when none is filtered — the shared-IP case)
+  const [nodeFocus, setNodeFocus] = useState<{ kind: 'host' | 'ip' | 'ipset'; value: string; company?: string; values?: string[] } | null>(null)
 
   // Compare mode (aggregated across companies)
   const [compareMode, setCompareMode] = useState(false)
@@ -712,18 +715,64 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
   const companyHosts = selectedCompany
     ? allHosts.filter((h) => h.company === selectedCompany.name)
     : allHosts
-  const visibleHosts = activeDomain ? filterHostsByDomain(companyHosts, activeDomain) : companyHosts
+  const scopedHosts = activeDomain ? filterHostsByDomain(companyHosts, activeDomain) : companyHosts
+  // A node belongs to the scope it was picked in: changing company/domain drops it
+  useEffect(() => { setNodeFocus(null) }, [companyFilter, activeDomain])
+  // The map keeps drawing the scope (not the focused subset), so other nodes stay clickable
+  const visibleHosts = nodeFocus
+    ? scopedHosts.filter((h) => {
+        if (nodeFocus.kind === 'host') return h.value === nodeFocus.value && h.company === nodeFocus.company
+        const wanted = nodeFocus.kind === 'ipset' ? nodeFocus.values ?? [] : [nodeFocus.value]
+        return h.kind === 'ip' ? wanted.includes(h.value) : (h.ips ?? []).some((ip) => wanted.includes(ip))
+      })
+    : scopedHosts
+  // The host table sits below the map, often off-screen: bring it into view after a node click
+  const hostsCardRef = useRef<HTMLDivElement | null>(null)
+  const revealHosts = () => {
+    setTimeout(() => hostsCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60)
+  }
   const selectDomain = (companyName: string, domain: string) => {
     const c = companies.find((x) => x.name === companyName)
     if (!c) return
     setCompanyFilter(String(c.id))
     setDomainSel({ companyId: c.id, domain })
+    setNodeFocus(null)
+    revealHosts()
   }
   const selectCompanyByName = (companyName: string) => {
     const c = companies.find((x) => x.name === companyName)
     if (!c) return
     setCompanyFilter(String(c.id))
     setDomainSel(null)
+    setNodeFocus(null)
+    revealHosts()
+  }
+  const showHostList = () => { if (!HOST_FILTERS.has(category)) setCategory('hosts') }
+  const selectHostNode = (host: string, companyName: string) => {
+    setNodeFocus({ kind: 'host', value: host, company: companyName })
+    showHostList()
+    revealHosts()
+  }
+  // Header chips toggle: a second click on the active one clears it
+  const selectIpGroup = (group: IpGroup, ips: string[]) => {
+    if (nodeFocus?.kind === 'ipset' && nodeFocus.value === group) {
+      setNodeFocus(null)
+      return
+    }
+    setNodeFocus({ kind: 'ipset', value: group, values: ips })
+    showHostList()
+    revealHosts()
+  }
+  // "Clear filters" on the map: everything a node click can have set
+  const clearFilters = () => {
+    setNodeFocus(null)
+    setDomainSel(null)
+    if (!locked) setCompanyFilter('')
+  }
+  const selectIpNode = (ip: string) => {
+    setNodeFocus({ kind: 'ip', value: ip })
+    showHostList()
+    revealHosts()
   }
   const isHostView = HOST_FILTERS.has(category)
   const filteredCompanies = selectedCompany ? [selectedCompany] : companies
@@ -1069,6 +1118,21 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
               </button>
             </span>
           )}
+          {nodeFocus && (
+            <span className="chip bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 inline-flex items-center gap-1.5 font-mono">
+              {nodeFocus.kind === 'ip' ? t('dashboard.nodeFilterIp', { value: nodeFocus.value })
+                : nodeFocus.kind === 'ipset'
+                  ? t(`nodeMap.${nodeFocus.value === 'cross' ? 'crossIps' : nodeFocus.value === 'shared' ? 'sharedIps' : 'providerIps'}`, { count: nodeFocus.values?.length ?? 0 })
+                  : nodeFocus.value}
+              <button
+                onClick={() => setNodeFocus(null)}
+                className="hover:text-fuchsia-900 transition-colors"
+                title={t('dashboard.clearNodeFilter')}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )}
           <input
             type="text"
             value={search}
@@ -1254,11 +1318,18 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
 
           {constellationOn && (
             <AttackSurfaceGraph
-              hosts={visibleHosts}
+              hosts={scopedHosts}
+              drawHosts={visibleHosts}
               companies={filteredCompanies}
               focusDomain={activeDomain || null}
+              selected={nodeFocus}
               onSelectCompany={selectCompanyByName}
               onSelectDomain={selectDomain}
+              onSelectHost={selectHostNode}
+              onSelectIp={selectIpNode}
+              onSelectIpGroup={selectIpGroup}
+              filtered={Boolean(nodeFocus || activeDomain || (selectedCompany && !locked))}
+              onClearFilters={clearFilters}
             />
           )}
 
@@ -1267,7 +1338,7 @@ export default function GlobalDashboard({ onGoToCompanies, onOpenCompany, locked
               {t('dashboard.noAssets')}
             </div>
           ) : (
-            <div className="card">
+            <div className="card scroll-mt-4" ref={hostsCardRef}>
               <div className="flex flex-wrap items-center gap-3 mb-3">
                 <h3 className="text-[15px] font-semibold tracking-tight text-dark-100 flex-1">
                   {isHostView && category !== 'hosts'

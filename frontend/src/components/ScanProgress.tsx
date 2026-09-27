@@ -65,6 +65,7 @@ export const MODULE_LABELS: Record<string, string> = {
   ports:        'Port Scanning',
   reverse_ip:   'Reverse IP Lookup',
   nuclei:       'Nuclei Vulnerability Scan',
+  kev:          'Known Exploited Vulnerabilities',
   agent:        'AI Agent Investigation',
   subdomain_eval: 'Chained Evaluation',
 }
@@ -97,6 +98,7 @@ const MODULE_ICONS: Record<string, ComponentType<{ className?: string }>> = {
   ports:        Plug,
   reverse_ip:   Network,
   nuclei:       Dna,
+  kev:          ShieldAlert,
   mobile_apps:  Smartphone,
   subdomain_eval: Radar,
   agent:        Bot,
@@ -110,7 +112,7 @@ const MODULE_ORDER = [
   'admin', 'frontend_cve', 'js_secrets', 'secret_verification', 'smart_fuzz',
   'blacklist', 'exposed', 'breach',
   'cloud_storage', 'api_exposure', 'wayback',
-  'ports', 'reverse_ip', 'nuclei',
+  'ports', 'reverse_ip', 'nuclei', 'kev',
   'agent',
 ]
 
@@ -121,7 +123,7 @@ const PHASES: { key: string; modules: string[] }[] = [
   { key: 'secrets', modules: ['admin', 'js_secrets', 'secret_verification', 'smart_fuzz', 'exposed', 'wayback'] },
   { key: 'leaks',   modules: ['email', 'breach', 'blacklist'] },
   { key: 'cloud',   modules: ['cloud_storage', 'api_exposure'] },
-  { key: 'vulns',   modules: ['ports', 'nuclei'] },
+  { key: 'vulns',   modules: ['ports', 'nuclei', 'kev'] },
   { key: 'ai',      modules: ['agent'] },
 ]
 

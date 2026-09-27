@@ -54,6 +54,62 @@ export function KeyValue({ label, value }: { label: string; value: React.ReactNo
   )
 }
 
+/**
+ * Clickable URL for a discovered path. `path` may already be a full URL (some
+ * discoveries store one), otherwise it is resolved against the host it was
+ * found on. Discovered paths carry no scheme, so https is assumed.
+ */
+export function pathUrl(host: string, path: string): string {
+  if (/^https?:\/\//i.test(path)) return path
+  return `https://${host}${path.startsWith('/') ? '' : '/'}${path}`
+}
+
+/**
+ * Plain-language meaning of a finding category ("categoryHelp.*" in i18n), so
+ * every place that shows one can explain it on hover.
+ */
+export function useCategoryHelp(): (key: string) => string {
+  const { t } = useTranslation()
+  return (key: string) => t(`categoryHelp.${key}`, { defaultValue: '' })
+}
+
+/** Recharts tooltip for a category chart: name, count and what the category means. */
+export function CategoryChartTooltip({ active, payload, labelOf }: {
+  active?: boolean
+  payload?: { value?: unknown; payload?: { key?: string } }[]
+  labelOf: (key: string) => string
+}) {
+  const help = useCategoryHelp()
+  if (!active || !payload?.length) return null
+  const key = payload[0].payload?.key ?? ''
+  return (
+    <div className="max-w-[260px] rounded-lg border border-dark-700 bg-white px-3 py-2 text-xs shadow-lg">
+      <div className="font-semibold text-dark-100">{labelOf(key)} · {String(payload[0].value ?? '')}</div>
+      <div className="text-dark-500 mt-0.5 leading-snug">{help(key)}</div>
+    </div>
+  )
+}
+
+/** Y-axis label of a category chart with the native hover explanation. */
+export function CategoryAxisTick({ x, y, payload, labelOf, fill = '#1c2740' }: {
+  x?: number
+  y?: number
+  payload?: { value?: string }
+  labelOf: (key: string) => string
+  fill?: string
+}) {
+  const help = useCategoryHelp()
+  const key = payload?.value ?? ''
+  return (
+    <g transform={`translate(${x ?? 0},${y ?? 0})`}>
+      <title>{help(key)}</title>
+      <text x={-4} y={0} dy={4} textAnchor="end" fontSize={11} fill={fill} style={{ cursor: 'help' }}>
+        {labelOf(key)}
+      </text>
+    </g>
+  )
+}
+
 export const PAGE_SIZE = 50
 
 export function Pager({ page, total, onPage, pageSize = PAGE_SIZE }: {

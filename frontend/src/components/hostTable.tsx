@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { HostAsset, HostKind, WithCompany } from '../types/report'
-import { RiskBadge } from './ui'
+import { RiskBadge, pathUrl } from './ui'
+import { SourceChip } from './assetTable'
 import { fmtShort, td, th } from './assetTable'
 import { ChevronDown } from 'lucide-react'
 
@@ -81,7 +82,7 @@ function TechChips({ host, limit }: { host: HostAsset; limit?: number }) {
           title={tech.category}
           className="text-[10px] px-1.5 py-0.5 rounded-full font-medium border bg-cyan-50 text-cyan-700 border-cyan-200 whitespace-nowrap"
         >
-          {tech.name}
+          {tech.name}{tech.version ? ` ${tech.version}` : ''}
         </span>
       ))}
       {limit != null && techs.length > limit && (
@@ -94,7 +95,10 @@ function TechChips({ host, limit }: { host: HostAsset; limit?: number }) {
   )
 }
 
+const WEB_PORTS = new Set([80, 443])
+
 function PortChips({ host, limit }: { host: HostAsset; limit?: number }) {
+  const { t } = useTranslation()
   const ports = host.open_ports ?? []
   const shown = limit ? ports.slice(0, limit) : ports
   return (
@@ -102,8 +106,17 @@ function PortChips({ host, limit }: { host: HostAsset; limit?: number }) {
       {shown.map((p) => (
         <span
           key={p.port}
-          title={p.service ?? undefined}
-          className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold border bg-emerald-50 text-emerald-700 border-emerald-200 whitespace-nowrap font-mono"
+          title={`${p.service ? `${p.service} — ` : ''}${p.severity ? `${p.severity.toUpperCase()}: ` : ''}${t(p.risky ? 'hosts.port.risky' : WEB_PORTS.has(p.port) ? 'hosts.port.web' : 'hosts.port.other')}`}
+          className={clsx(
+            'text-[10px] px-1.5 py-0.5 rounded-full font-semibold border whitespace-nowrap font-mono',
+            // Open is not "good": color says what kind of service it is, not that it is open
+            // Same scale as the risk badges: red critical, orange high, amber medium
+            p.severity === 'critical' && 'bg-red-50 text-red-700 border-red-200',
+            p.risky && (p.severity === 'high' || !p.severity) && 'bg-orange-50 text-orange-700 border-orange-200',
+            p.severity === 'medium' && 'bg-amber-50 text-amber-700 border-amber-200',
+            !p.risky && WEB_PORTS.has(p.port) && 'bg-dark-900 text-dark-300 border-dark-700',
+            !p.risky && !WEB_PORTS.has(p.port) && 'bg-sky-50 text-sky-700 border-sky-200',
+          )}
         >
           {p.port}{p.service ? `/${p.service}` : ''}
         </span>
@@ -141,8 +154,8 @@ export function ExpandedHost({ host }: { host: HostAsset }) {
         <ul className="space-y-1">
           {host.endpoints.map((e) => (
             <li key={e.path} className="flex items-center gap-2 text-xs font-mono text-dark-200 break-all">
-              {e.path}
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-purple-50 text-purple-700 border-purple-200 font-sans whitespace-nowrap">{e.source}</span>
+              <a href={pathUrl(host.value, e.path)} target="_blank" rel="noopener noreferrer" className="text-cyber-700 hover:underline">{e.path}</a>
+              <SourceChip source={e.source} className="text-[10px] px-1.5 py-0.5 rounded-full border bg-purple-50 text-purple-700 border-purple-200 font-sans whitespace-nowrap" />
             </li>
           ))}
         </ul>
@@ -172,11 +185,7 @@ export function ExpandedHost({ host }: { host: HostAsset }) {
         <ul className="space-y-1">
           {host.exposed_files.map((f) => (
             <li key={f.path} className="flex flex-wrap items-center gap-2 text-xs">
-              {f.url ? (
-                <a href={f.url} target="_blank" rel="noopener noreferrer" className="font-mono text-cyber-700 hover:underline break-all">{f.path}</a>
-              ) : (
-                <span className="font-mono text-dark-200 break-all">{f.path}</span>
-              )}
+              <a href={f.url ?? pathUrl(host.value, f.path)} target="_blank" rel="noopener noreferrer" className="font-mono text-cyber-700 hover:underline break-all">{f.path}</a>
               <RiskBadge risk={f.risk} />
               {f.description && <span className="text-dark-500">{f.description}</span>}
             </li>

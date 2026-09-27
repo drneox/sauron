@@ -32,6 +32,7 @@ import CloudStorageSection from './sections/CloudStorageSection'
 import ApiExposureSection from './sections/ApiExposureSection'
 import WaybackSection from './sections/WaybackSection'
 import NucleiSection from './sections/NucleiSection'
+import KevSection from './sections/KevSection'
 
 interface Props {
   report: ScanReport
@@ -176,6 +177,7 @@ export default function ReportView({ report, onNewScan }: Props) {
       {/* Historical & Deep Scan */}
       {modules.wayback && <WaybackSection data={modules.wayback} />}
       {modules.nuclei && <NucleiSection data={modules.nuclei} />}
+      {modules.kev && <KevSection data={modules.kev} />}
 
       {/* Network */}
       {modules.ports && <PortsSection data={modules.ports} />}

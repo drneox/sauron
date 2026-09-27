@@ -16,6 +16,7 @@ interface ScanSummary {
   kind?: ScanKind
   note?: string | null
   requeued_as?: string | null
+  stopping?: boolean
 }
 
 interface Props {
@@ -30,6 +31,8 @@ export default function ScanHistory({ onViewReport, onScanStarted, readOnly = fa
   const { t } = useTranslation()
   const [scans, setScans] = useState<ScanSummary[]>([])
   const [busyId, setBusyId] = useState<string | null>(null)
+  // Stop requested from here: the server keeps the scan "running" until its current modules end
+  const [stopRequested, setStopRequested] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     try {
@@ -54,6 +57,7 @@ export default function ScanHistory({ onViewReport, onScanStarted, readOnly = fa
     setBusyId(scanId)
     try {
       await axios.post(`/api/scan/${scanId}/stop`)
+      setStopRequested((prev) => new Set(prev).add(scanId))
       await load()
     } catch { /* ignore */ } finally {
       setBusyId(null)
@@ -137,11 +141,12 @@ export default function ScanHistory({ onViewReport, onScanStarted, readOnly = fa
                 {!readOnly && inFlight && (
                   <button
                     onClick={() => stopScan(s.scan_id)}
-                    disabled={busyId === s.scan_id}
+                    disabled={busyId === s.scan_id || s.stopping || stopRequested.has(s.scan_id)}
                     className="btn-secondary inline-flex items-center gap-1.5 text-red-600 hover:bg-red-50 hover:border-red-300 disabled:opacity-50"
-                    title={t('history.stopTitle')}
+                    title={s.stopping || stopRequested.has(s.scan_id) ? t('history.stoppingTitle') : t('history.stopTitle')}
                   >
-                    <Square className="w-3.5 h-3.5" /> {t('history.stop')}
+                    <Square className={`w-3.5 h-3.5 ${s.stopping || stopRequested.has(s.scan_id) ? 'animate-pulse' : ''}`} />
+                    {s.stopping || stopRequested.has(s.scan_id) ? t('history.stopping') : t('history.stop')}
                   </button>
                 )}
                 {inFlight && onScanStarted && (

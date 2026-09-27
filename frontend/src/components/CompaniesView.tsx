@@ -682,6 +682,20 @@ function CompanyCard({
   useEffect(() => { setAgentOverride(null) }, [persistedAgentAll])
   const [notice, setNotice] = useState('')
 
+  // The bulk selects show what the company's domains actually have: the shared
+  // value when they all agree, the "mixed" placeholder when they differ (or when a
+  // domain has an interval the options don't offer). Optimistic until the reload lands.
+  const sharedValue = (values: string[], options: { value: string }[]) =>
+    values.length > 0 && values.every((v) => v === values[0]) && options.some((o) => o.value === values[0])
+      ? values[0]
+      : ''
+  const persistedSchedule = sharedValue(company.domains.map(scheduleValue), SCHEDULE_OPTIONS)
+  const persistedDiscover = sharedValue(company.domains.map(discoverValue), DISCOVERY_OPTIONS)
+  const [scheduleOptimistic, setScheduleOptimistic] = useState<string | null>(null)
+  const [discoverOptimistic, setDiscoverOptimistic] = useState<string | null>(null)
+  useEffect(() => { setScheduleOptimistic(null) }, [persistedSchedule])
+  useEffect(() => { setDiscoverOptimistic(null) }, [persistedDiscover])
+
   const handleDiscoverAssets = async () => {
     setBatchBusy(true)
     try {
@@ -718,6 +732,7 @@ function CompanyCard({
 
   const handleScheduleAll = async (value: string) => {
     setBatchBusy(true)
+    setScheduleOptimistic(value)
     try {
       const payload =
         value === 'off'
@@ -730,11 +745,13 @@ function CompanyCard({
           ? t('companies.noticeScheduleOff', { count: updated })
           : t('companies.noticeScheduled', {
               count: updated,
-              interval: value === '24' ? t('companies.intervalDaily') : t('companies.intervalWeekly'),
+              interval: value === '24' ? t('companies.intervalDaily')
+                : value === '168' ? t('companies.intervalWeekly') : t('companies.intervalMonthly'),
             }),
       )
       onChanged()
     } catch (err) {
+      setScheduleOptimistic(null)
       onError(errorMessage(err, t('companies.scheduleAllError', { name: company.name })))
     } finally {
       setBatchBusy(false)
@@ -743,6 +760,7 @@ function CompanyCard({
 
   const handleDiscoverAll = async (value: string) => {
     setBatchBusy(true)
+    setDiscoverOptimistic(value)
     try {
       // Discovery-only payload: per-domain vuln schedules are preserved.
       const payload =
@@ -761,6 +779,7 @@ function CompanyCard({
       )
       onChanged()
     } catch (err) {
+      setDiscoverOptimistic(null)
       onError(errorMessage(err, t('companies.scheduleAllError', { name: company.name })))
     } finally {
       setBatchBusy(false)
@@ -877,16 +896,13 @@ function CompanyCard({
           <label className="inline-flex items-center gap-1.5 text-xs text-dark-400">
             <CalendarClock className="w-3.5 h-3.5 text-dark-500" />
             <select
-              defaultValue=""
+              value={scheduleOptimistic ?? persistedSchedule}
               disabled={batchBusy}
-              onChange={(e) => {
-                if (e.target.value) handleScheduleAll(e.target.value)
-                e.target.value = ''
-              }}
+              onChange={(e) => { if (e.target.value) handleScheduleAll(e.target.value) }}
               className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 disabled:opacity-50 transition-colors duration-150"
               title={t('companies.scheduleAllTitle')}
             >
-              <option value="" disabled>{t('companies.scheduleAll')}</option>
+              <option value="" disabled>{t('companies.scheduleMixed')}</option>
               {SCHEDULE_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{t(`companies.schedule.${o.key}`)}</option>
               ))}
@@ -895,16 +911,13 @@ function CompanyCard({
           <label className="inline-flex items-center gap-1.5 text-xs text-dark-400">
             <Radar className="w-3.5 h-3.5 text-dark-500" />
             <select
-              defaultValue=""
+              value={discoverOptimistic ?? persistedDiscover}
               disabled={batchBusy}
-              onChange={(e) => {
-                if (e.target.value) handleDiscoverAll(e.target.value)
-                e.target.value = ''
-              }}
+              onChange={(e) => { if (e.target.value) handleDiscoverAll(e.target.value) }}
               className="bg-white border border-dark-700 rounded-lg px-2 py-1.5 text-xs text-dark-200 focus:outline-none focus:border-cyber-500 disabled:opacity-50 transition-colors duration-150"
               title={t('companies.discoverScheduleAllTitle')}
             >
-              <option value="" disabled>{t('companies.discoverScheduleAll')}</option>
+              <option value="" disabled>{t('companies.discoverScheduleMixed')}</option>
               {DISCOVERY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{t(`companies.discoverySchedule.${o.key}`)}</option>
               ))}

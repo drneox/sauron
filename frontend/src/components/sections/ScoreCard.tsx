@@ -29,7 +29,7 @@ const MODULE_LABELS: Record<string, string> = {
   mobile_apps: 'Mobile Apps', reverse_ip: 'Reverse IP',
   subdomain_eval: 'Chained Eval', smart_fuzz: 'Smart Fuzzing',
   wayback: 'Wayback', cloud_storage: 'Cloud Storage',
-  api_exposure: 'API Exposure', frontend_cve: 'Frontend CVEs',
+  api_exposure: 'API Exposure', frontend_cve: 'Frontend CVEs', kev: 'Known Exploited',
 }
 
 const RISK_COLOR: Record<string, string> = {

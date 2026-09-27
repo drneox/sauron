@@ -22,6 +22,8 @@ export interface GNode {
   deg: number
   shared: boolean
   cross: boolean
+  /** Every host on it is a vendor service endpoint (e.g. Microsoft 365 autodiscover) */
+  provider: boolean
 }
 
 export interface GLink {
@@ -42,6 +44,15 @@ const worst = (a: string, b: string) => (rank(b) > rank(a) ? b : a)
 
 const NODE_CAP = 420
 
+// Hostname labels that only exist to point at a mail/collaboration vendor's
+// shared endpoints (Microsoft 365, Lync/Teams). Many unrelated companies resolve
+// them to the same vendor IPs, so a "shared IP" made only of these says nothing
+// about the companies being related.
+const PROVIDER_LABELS = new Set([
+  'autodiscover', 'lyncdiscover', 'sip', 'enterpriseregistration', 'enterpriseenrollment', 'msoid',
+])
+const firstLabel = (host: string) => host.toLowerCase().split('.')[0]
+
 /**
  * Builds the constellation from the host inventory: company -> domain ->
  * subdomain, plus IP nodes linked to every host that resolves to them. An IP
@@ -61,7 +72,7 @@ export function buildGraph(
   const add = (id: string, type: NodeType, label: string, risk: string, company: string, domain: string, r: number, detail: string) => {
     let n = nodes.get(id)
     if (!n) {
-      n = { id, type, label, risk, r, company, domain, detail, x: 0, y: 0, vx: 0, vy: 0, pinned: false, deg: 0, shared: false, cross: false }
+      n = { id, type, label, risk, r, company, domain, detail, x: 0, y: 0, vx: 0, vy: 0, pinned: false, deg: 0, shared: false, cross: false, provider: false }
       nodes.set(id, n)
     }
     return n
@@ -131,6 +142,11 @@ export function buildGraph(
     const ipNode = nodes.get(ipId)!
     if (attached.length < 2) continue
     const domains = new Set(attached.map((n) => n.domain))
+    if (attached.every((n) => n.type === 'subdomain' && PROVIDER_LABELS.has(firstLabel(n.label)))) {
+      ipNode.provider = true
+      ipNode.detail = `Vendor-managed service endpoint (${attached.length} hosts, ${domains.size} domain${domains.size === 1 ? '' : 's'}) — not evidence of a relation`
+      continue
+    }
     ipNode.shared = true
     ipNode.cross = domains.size > 1
     ipNode.r = ipNode.cross ? 6 : 4.6
