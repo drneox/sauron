@@ -4,6 +4,7 @@ Generates a professional, styled PDF with all scan results.
 """
 from __future__ import annotations
 
+from scoring import grade_of_score as _grade_for_score
 import html as _html
 import io
 from datetime import datetime
@@ -2115,18 +2116,6 @@ def _safe_extend(story: list, builder_name: str, builder_fn, *args) -> None:
 # ─── Consolidated Company Report ──────────────────────────────────────────────
 
 _RISK_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
-
-
-def _grade_for_score(score: int) -> str:
-    if score >= 90:
-        return "A"
-    if score >= 75:
-        return "B"
-    if score >= 60:
-        return "C"
-    if score >= 40:
-        return "D"
-    return "F"
 
 
 def _fmt_scan_date(value: Any) -> str:
