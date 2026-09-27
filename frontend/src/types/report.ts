@@ -571,10 +571,12 @@ export interface VerifiedSecret {
 }
 
 export interface JwtAnalysis {
-  source: string
-  alg: string
-  issuer: string
-  expires: string
+  key: string
+  source: string | null
+  alg: string | null
+  iss: string | null
+  tenant: string | null
+  exp: number | null
   issues: string[]
 }
 
@@ -953,6 +955,7 @@ export interface AppSettings {
   enabled_modules: Record<string, boolean>
   agent_default_steps: number
   default_interval_hours: number
+  audit_retention_days: number
   chain_eval_enabled?: boolean
   chain_eval_max_targets?: number
   chain_eval_fuzz?: boolean
@@ -973,6 +976,7 @@ export interface AppSettings {
   ai: { configured: boolean; model: string | null }
   proxy: { enabled: boolean; pool_size: number }
   notify: { configured: boolean }
+  leakcheck: { configured: boolean }
 }
 
 // Scan diff vs previous scan of the same domain

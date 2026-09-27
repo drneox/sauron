@@ -214,6 +214,30 @@ def _summarize_tool_result(result: Any, limit: int = MAX_TOOL_RESULT_CHARS) -> s
     return text[:limit]
 
 
+# Which lists in a tool's full result carry the structured evidence behind its
+# findings, kept on the step (bounded) since the full tool_result is otherwise
+# discarded — main._agent_finding_evidence reuses the matching deterministic
+# module's own evidence rule (mine_js -> js_secrets, etc.) against this.
+_STEP_EVIDENCE_KEYS: dict[str, tuple[str, ...]] = {
+    "mine_js": ("endpoints", "hosts"),
+    "fuzz_paths": ("paths_found",),
+    "probe_sensitive_files": ("exposed", "admin_panels"),
+}
+MAX_EVIDENCE_ITEMS = 20
+
+
+def _step_evidence(tool: str, tool_result: Any) -> dict[str, list] | None:
+    keys = _STEP_EVIDENCE_KEYS.get(tool)
+    if not keys or not isinstance(tool_result, dict):
+        return None
+    out: dict[str, list] = {}
+    for key in keys:
+        v = tool_result.get(key)
+        if isinstance(v, list) and v:
+            out[key] = v[:MAX_EVIDENCE_ITEMS]
+    return out or None
+
+
 def _extract_tool_findings(tool: str, result: Any) -> list[str]:
     if not isinstance(result, dict):
         return []
@@ -243,6 +267,21 @@ def _novel_findings(findings: list[str], target: str, apex: str,
     return out
 
 
+# mine_js / fuzz_paths / probe_sensitive_files / enumerate_subdomains each
+# wrap the same module(s) run_module could call by name — same duplication
+# risk, so they get the same guard: re-running against the apex wouldn't
+# enrich anything the deterministic scan didn't already cover, only add a
+# near-identical finding (a second live fetch can even disagree slightly
+# with the first — e.g. one more endpoint caught this time — which used to
+# read as TWO separate findings instead of one).
+_TOOL_MODULES: dict[str, tuple[str, ...]] = {
+    "mine_js": ("js_secrets",),
+    "fuzz_paths": ("smart_fuzz",),
+    "probe_sensitive_files": ("exposed", "admin"),
+    "enumerate_subdomains": ("subdomains",),
+}
+
+
 class _AgentState:
     def __init__(self, apex: str, extra_allowed: set[str], ran_modules: set[str] | None = None) -> None:
         self.apex = apex
@@ -252,6 +291,13 @@ class _AgentState:
         self.finished = False
         self.summary: str = ""
         self.assets_discovered = 0
+
+    def _already_covered(self, host: str, tool: str) -> bool:
+        """True when every module `tool` would run is already in the
+        deterministic result for `host` — nothing left for it to add there."""
+        modules = _TOOL_MODULES.get(tool)
+        return bool(modules) and host == self.apex.strip().lower() \
+            and all(m in self.ran_modules for m in modules)
 
     def run_tool(self, name: str, args: dict) -> Any:
         target = str(args.get("domain") or args.get("target") or "").strip().lower()
@@ -274,6 +320,13 @@ class _AgentState:
                         "reason": f"'{module}' already ran on {host} in the deterministic scan — "
                                   "its result is in your context. Investigate a subdomain or use another tool."}
             return func(target)
+        host = target.removeprefix("https://").removeprefix("http://").split("/")[0]
+        if name in _TOOL_MODULES and self._already_covered(host, name):
+            modules = ", ".join(_TOOL_MODULES[name])
+            return {"status": "skipped",
+                    "reason": f"'{name}' would only repeat {modules} on {host}, already run in the "
+                              "deterministic scan — its result is in your context. Investigate a "
+                              "subdomain instead, or use another tool."}
         if name == "enumerate_subdomains":
             result = subdomain_enum.run(target)
             self.assets_discovered += len(result.get("subdomains") or [])
@@ -384,6 +437,9 @@ def run(
             "duration_s": round(duration, 2),
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        evidence_source = _step_evidence(tool, tool_result)
+        if evidence_source:
+            step["evidence_source"] = evidence_source
         steps.append(step)
         risk = tool_result.get("risk", "low") if isinstance(tool_result, dict) else "low"
         for f in new_findings:

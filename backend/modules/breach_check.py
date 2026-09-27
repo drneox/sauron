@@ -147,6 +147,50 @@ def _leakcheck_domain(domain: str) -> dict:
     return result
 
 
+LEAKCHECK_QUERY_URL = "https://leakcheck.io/api/v2/query/{term}"
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def query_leakcheck(term: str) -> dict:
+    """On-demand lookup of one email/username against LeakCheck's paid v2 API
+    (LEAKCHECK_API_KEY) — the actual leaked records, not just a domain-wide
+    count. Manual and synchronous by design: it is never called from the
+    automated scan pipeline (it would burn the account's quota on every scan)
+    and its result is never persisted — the caller shows it and discards it.
+    """
+    term = (term or "").strip()
+    if not term or len(term) > 320:
+        return {"status": "error", "error": "invalid_term"}
+    if not _EMAIL_RE.match(term) and not re.match(r"^[\w.\-]{1,100}$", term):
+        return {"status": "error", "error": "invalid_term"}
+    api_key = os.environ.get("LEAKCHECK_API_KEY", "").strip()
+    if not api_key:
+        return {"status": "not_configured"}
+    try:
+        resp = httpx.get(
+            LEAKCHECK_QUERY_URL.format(term=term),
+            headers={"X-API-Key": api_key, "User-Agent": "Dumb-Auditor/1.0"},
+            params={"type": "auto"},
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"[breach/leakcheck] query failed: {e}")
+        return {"status": "error", "error": "request_failed"}
+    if resp.status_code == 429:
+        return {"status": "error", "error": "rate_limited"}
+    if not data.get("success"):
+        return {"status": "error", "error": str(data.get("error") or "lookup_failed")[:200]}
+    results = data.get("result") or []
+    return {
+        "status": "ok",
+        "found": data.get("found", len(results)),
+        # Each record as-is, minus nothing — this endpoint is opt-in and
+        # per-query, the operator already knows what they're looking up.
+        "records": results if isinstance(results, list) else [],
+    }
+
+
 def _hunter_email_finder(domain: str) -> dict:
     """
     Hunter.io domain search — requires HUNTER_API_KEY in environment.

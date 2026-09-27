@@ -29,11 +29,13 @@ def _b64url_decode(segment: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(segment + pad))
 
 
-def _analyze_jwt(token: str) -> dict:
-    """Decode a JWT without verifying its signature and flag common issues."""
+def _analyze_jwt(token: str, source: str | None = None) -> dict:
+    """Decode a JWT without verifying its signature and flag common issues.
+    `source` is the JS file the candidate came from (js_secrets already knows
+    it; kept here so the UI can show where the token was found)."""
     result: dict[str, Any] = {
-        "key": _redact(token), "alg": None, "iss": None, "tenant": None,
-        "exp": None, "issues": [],
+        "key": _redact(token), "source": source, "alg": None, "iss": None,
+        "tenant": None, "exp": None, "issues": [],
     }
     parts = token.split(".")
     if len(parts) != 3:
@@ -112,7 +114,7 @@ def run(domain: str, raw: dict | None = None) -> dict[str, Any]:
 
     # ── Offline JWT analysis
     jwt_analysis = [
-        _analyze_jwt(c["value"]) for c in candidates if c.get("type") == "JWT Token"
+        _analyze_jwt(c["value"], c.get("source")) for c in candidates if c.get("type") == "JWT Token"
     ]
 
     valid_count = sum(1 for v in verified if v["verdict"] == "valid")

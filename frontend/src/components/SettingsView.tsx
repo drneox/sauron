@@ -19,6 +19,7 @@ import {
   Network,
   Puzzle,
   Radar,
+  ScrollText,
   Sparkles,
   X,
   type LucideIcon,
@@ -125,6 +126,8 @@ export default function SettingsView() {
   const [savingSteps, setSavingSteps] = useState(false)
   const [uaInput, setUaInput] = useState('')
   const [savingUa, setSavingUa] = useState(false)
+  const [retentionInput, setRetentionInput] = useState('')
+  const [savingRetention, setSavingRetention] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -134,6 +137,7 @@ export default function SettingsView() {
         setSettings(data)
         setStepsInput(String(data.agent_default_steps ?? ''))
         setUaInput(data.user_agent ?? '')
+        setRetentionInput(String(data.audit_retention_days ?? 90))
       })
       .catch((err) => {
         if (!cancelled) setError(errorMessage(err, t('settings.loadError')))
@@ -254,6 +258,31 @@ export default function SettingsView() {
     } catch (err) {
       setSettings(prev)
       setError(errorMessage(err, t('settings.fanoutError')))
+    }
+  }
+
+  const saveRetention = async () => {
+    if (!settings || savingRetention) return
+    const n = Math.round(Number(retentionInput))
+    if (!Number.isFinite(n) || n < 1) {
+      setRetentionInput(String(settings.audit_retention_days ?? 90))
+      return
+    }
+    if (n === settings.audit_retention_days) return
+    const prev = settings
+    setSettings({ ...settings, audit_retention_days: n })
+    setSavingRetention(true)
+    try {
+      const { data } = await axios.put<AppSettings>('/api/settings', { audit_retention_days: n })
+      setSettings(data)
+      setRetentionInput(String(data.audit_retention_days ?? n))
+      setError('')
+    } catch (err) {
+      setSettings(prev)
+      setRetentionInput(String(prev.audit_retention_days ?? 90))
+      setError(errorMessage(err, t('settings.auditError')))
+    } finally {
+      setSavingRetention(false)
     }
   }
 
@@ -658,6 +687,30 @@ export default function SettingsView() {
                   <span className="text-xs text-dark-500">{t('settings.discoverIntervalHint')}</span>
                 </div>
               </div>
+            </div>
+          </SectionCard>
+
+          {/* Audit log retention */}
+          <SectionCard title={t('settings.auditTitle')} icon={<ScrollText />}>
+            <p className="text-xs text-dark-500 mb-4">
+              {t('settings.auditDesc')}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="text-sm text-dark-500" htmlFor="audit-retention">
+                {t('settings.auditRetention')}
+              </label>
+              <input
+                id="audit-retention"
+                type="number"
+                min={1}
+                value={retentionInput}
+                disabled={savingRetention}
+                onChange={(e) => setRetentionInput(e.target.value)}
+                onBlur={saveRetention}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                className="w-24 bg-white border border-dark-700 rounded-lg px-3 py-1.5 text-sm text-dark-100 font-mono focus:outline-none focus:border-cyber-500 focus:ring-2 focus:ring-cyber-500/20 transition-colors duration-150 disabled:opacity-50"
+              />
+              <span className="text-xs text-dark-500">{t('settings.auditRetentionHint')}</span>
             </div>
           </SectionCard>
 

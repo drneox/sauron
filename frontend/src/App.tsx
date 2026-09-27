@@ -20,6 +20,7 @@ import ChatView from './components/ChatView'
 import LoginView from './components/LoginView'
 import UsersView from './components/UsersView'
 import SettingsView from './components/SettingsView'
+import AuditView from './components/AuditView'
 import ErrorBoundary from './components/ErrorBoundary'
 import axios from 'axios'
 import clsx from 'clsx'
@@ -32,6 +33,7 @@ import {
   LayoutDashboard,
   LogOut,
   ScanSearch,
+  ScrollText,
   Settings,
   Users,
 } from 'lucide-react'
@@ -393,6 +395,12 @@ export default function App() {
         { to: '/settings', label: t('nav.settings'), icon: Settings },
       ]
     : []
+  // Audit is operator+admin (viewers get 403 from the API), so it sits in the
+  // user menu ahead of the admin-only entries.
+  const userMenuItems: NavItem[] = [
+    ...(!readOnly ? [{ to: '/audit', label: t('nav.audit'), icon: ScrollText }] : []),
+    ...adminItems,
+  ]
 
   const scanMenuActive = ['/scan', '/agent', '/history', '/scanning'].some((p) => location.pathname.startsWith(p))
 
@@ -473,7 +481,7 @@ export default function App() {
               onClick={() => setUserMenuOpen((o) => !o)}
               className={clsx(
                 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors duration-150',
-                userMenuOpen || adminItems.some((i) => location.pathname.startsWith(i.to)) ? 'bg-cyber-100 text-cyber-700' : 'text-dark-500 hover:text-dark-100 hover:bg-dark-900',
+                userMenuOpen || userMenuItems.some((i) => location.pathname.startsWith(i.to)) ? 'bg-cyber-100 text-cyber-700' : 'text-dark-500 hover:text-dark-100 hover:bg-dark-900',
               )}
             >
               <span className="w-6 h-6 rounded-full bg-cyber-100 text-cyber-700 text-xs font-semibold uppercase flex items-center justify-center">
@@ -488,7 +496,7 @@ export default function App() {
                     <div className="text-xs font-medium text-dark-100">{user.email}</div>
                     <div className="text-[10px] text-dark-500 uppercase tracking-wider mt-0.5">{user.role}</div>
                   </div>
-                  {adminItems.map((item) => (
+                  {userMenuItems.map((item) => (
                     <button
                       key={item.to}
                       onClick={() => { navigate(item.to); setUserMenuOpen(false) }}
@@ -539,6 +547,7 @@ export default function App() {
           <Route path="/history" element={<HistoryPage readOnly={readOnly} />} />
           <Route path="/users" element={isAdmin ? <UsersView currentUser={user} /> : <Navigate to="/dashboard" replace />} />
           <Route path="/settings" element={isAdmin ? <SettingsView /> : <Navigate to="/dashboard" replace />} />
+          <Route path="/audit" element={readOnly ? <Navigate to="/dashboard" replace /> : <AuditView />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

@@ -145,6 +145,11 @@ class Finding(Model):
     # row the finding is filed under. Null when no single host applies (a
     # domain-wide module, or an older finding recorded before this field existed).
     host = fields.CharField(max_length=255, null=True)
+    # Extra structured context for this one line, when the module's raw result
+    # has it (e.g. breach's leak source/fields, a fuzzed path's HTTP status and
+    # response snippet) — the persisted `text` above is a one-line summary and
+    # was otherwise the only thing Remediation could ever show for a finding.
+    evidence = fields.JSONField(null=True)
     risk = fields.CharField(max_length=16)  # critical|high|medium|low|info
     category = fields.CharField(max_length=32, default="info")  # vulnerability|misconfiguration|exposure|info
     frameworks = fields.JSONField(default=list)  # e.g. ["NIST-CSF", "ISO-27001"]
@@ -171,6 +176,29 @@ class AssetHistory(Model):
 
     class Meta:
         table = "asset_history"
+
+
+class AuditEvent(Model):
+    """Who-did-what trail for sensitive in-app actions (logins, user
+    management, scan launches, finding status changes, manual LeakCheck
+    queries, settings edits). Written fire-and-forget via
+    modules/audit_log.record — auditing must never break the action itself.
+    Purged daily by the scheduler past `audit_retention_days`."""
+    id = fields.IntField(pk=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    # Nullable FK (set null on user delete) + an email snapshot so the trail
+    # still reads sensibly after the user row is gone; null user = the system
+    # itself (scheduler, startup).
+    user = fields.ForeignKeyField("models.User", related_name="audit_events",
+                                  null=True, on_delete=fields.SET_NULL)
+    user_email = fields.CharField(max_length=255, default="")
+    action = fields.CharField(max_length=64)  # e.g. "auth.login", "finding.status"
+    target = fields.CharField(max_length=255, null=True)  # e.g. "domain:example.com"
+    detail = fields.JSONField(null=True)
+    ip = fields.CharField(max_length=45, null=True)
+
+    class Meta:
+        table = "audit_events"
 
 
 class User(Model):

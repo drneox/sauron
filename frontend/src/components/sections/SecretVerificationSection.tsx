@@ -96,10 +96,14 @@ export default function SecretVerificationSection({ data }: { data: SecretVerifi
             {jwts.map((j, i) => (
               <div key={i} className="rounded border border-dark-700 bg-dark-800/50 px-2 py-1.5 text-[11px] text-dark-300">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-[10px] opacity-70 truncate">{j.source.split('/').pop()}</span>
-                  <span className="text-[10px]">alg: <span className="font-semibold">{j.alg}</span></span>
-                  {j.issuer && <span className="text-[10px] opacity-60">iss: {j.issuer}</span>}
-                  {j.expires && <span className="text-[10px] opacity-60">exp: {j.expires}</span>}
+                  <span className="font-mono text-[10px] opacity-80">{j.key}</span>
+                  {j.source && (
+                    <span className="font-mono text-[10px] opacity-70 truncate">{j.source.split('/').pop()}</span>
+                  )}
+                  <span className="text-[10px]">alg: <span className="font-semibold">{j.alg ?? '—'}</span></span>
+                  {j.iss && <span className="text-[10px] opacity-60">iss: {j.iss}</span>}
+                  {j.tenant && <span className="text-[10px] opacity-60">tenant: {j.tenant}</span>}
+                  {j.exp && <span className="text-[10px] opacity-60">exp: {new Date(j.exp * 1000).toLocaleDateString()}</span>}
                 </div>
                 {(j.issues ?? []).length > 0 && (
                   <ul className="mt-1 space-y-0.5">

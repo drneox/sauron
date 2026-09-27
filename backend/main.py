@@ -18,7 +18,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -76,6 +76,7 @@ from modules import (
     subdomain_eval,
     smart_fuzz,
     ai_summary,
+    audit_log,
     tools_runner,
     agent_scan,
     chat_assistant,
@@ -87,7 +88,7 @@ from modules import (
     proxy_pool,
 )
 
-from db import AppSetting, Asset, AssetHistory, Company, Domain, Endpoint, Finding, Scan, Schedule, Subdomain, User, close_db, init_db
+from db import AppSetting, Asset, AssetHistory, AuditEvent, Company, Domain, Endpoint, Finding, Scan, Schedule, Subdomain, User, close_db, init_db
 from modules import compliance
 from modules.common import (
     DEFAULT_USER_AGENT, MAX_USER_AGENT_LEN, clean_user_agent, set_user_agent,
@@ -445,9 +446,11 @@ SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hou
                  "tools_naabu", "tools_trufflehog",
                  "discovery_enabled", "vuln_scan_enabled",
                  "default_discover_interval_hours", "skip_discovery_default",
-                 "ai_domain_suggestions", "constellation_enabled", "user_agent")
+                 "ai_domain_suggestions", "constellation_enabled", "user_agent",
+                 "audit_retention_days")
 DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
+DEFAULT_AUDIT_RETENTION_DAYS = 90
 DEFAULT_DISCOVER_INTERVAL_HOURS = 720  # 30 days
 DEFAULT_CHAIN_EVAL_MAX = 10
 DEFAULT_FANOUT_MAX = 5
@@ -523,6 +526,10 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "skip_discovery_default": skip_discovery_default if isinstance(skip_discovery_default, bool) else False,
         "ai_domain_suggestions": ai_domain_suggestions if isinstance(ai_domain_suggestions, bool) else False,
         "constellation_enabled": stored.get("constellation_enabled") is True,
+        # Days audit events are kept before the scheduler purges them
+        "audit_retention_days": stored.get("audit_retention_days")
+            if isinstance(stored.get("audit_retention_days"), int) and stored.get("audit_retention_days") >= 1
+            else DEFAULT_AUDIT_RETENTION_DAYS,
         # "" = the built-in default; anything invalid also falls back to it
         "user_agent": clean_user_agent(stored.get("user_agent")) or "",
         **{f"tools_{name}": flag for name, flag in tools.items()},
@@ -548,6 +555,7 @@ def _settings_payload(settings: dict[str, Any]) -> dict[str, Any]:
             "pool_size": len(proxy_pool._configured_proxies()) if proxy_on else 0,
         },
         "notify": {"configured": bool(os.getenv("NOTIFY_WEBHOOK_URL", "").strip())},
+        "leakcheck": {"configured": bool(os.getenv("LEAKCHECK_API_KEY", "").strip())},
     }
 
 
@@ -1094,6 +1102,155 @@ def _finding_fingerprint(domain: str, module: str, text: str) -> str:
     return hashlib.sha1(f"{domain}|{module}|{normalized}".encode("utf-8")).hexdigest()
 
 
+_PATH_IN_TEXT_RE = re.compile(r"(/[\w\-./%]+)")
+
+
+def _match_path_entry(text: str, entries: list) -> dict | None:
+    """The dict in `entries` (each carrying a "path") whose path is the one
+    named in `text` — modules report one line per path, but only the path
+    itself, never the HTTP status/size/snippet that came with it."""
+    if not entries:
+        return None
+    m = _PATH_IN_TEXT_RE.search(text)
+    if not m:
+        return None
+    path = m.group(1)
+    for e in entries:
+        if isinstance(e, dict) and e.get("path") == path:
+            return e
+    return None
+
+
+def _path_evidence(text: str, mod: dict, list_keys: tuple[str, ...]) -> dict | None:
+    entries: list = []
+    for key in list_keys:
+        v = mod.get(key)
+        if isinstance(v, list):
+            entries.extend(v)
+    match = _match_path_entry(text, entries)
+    if not match:
+        return None
+    out: dict[str, Any] = {}
+    if match.get("status") is not None:
+        out["http_status"] = match["status"]
+    if match.get("size") is not None:
+        out["size_bytes"] = match["size"]
+    snippet = match.get("evidence") or match.get("snippet")
+    if snippet:
+        out["snippet"] = str(snippet)[:200]
+    return out or None
+
+
+def _breach_evidence(text: str, mod: dict) -> dict | None:
+    if text.startswith("LeakCheck:"):
+        lc = mod.get("leakcheck") or {}
+        out: dict[str, Any] = {}
+        sources = [s.get("name") or s.get("title") or str(s) if isinstance(s, dict) else str(s)
+                  for s in (lc.get("sources") or [])]
+        if sources:
+            out["source"] = ", ".join(sources)
+        if lc.get("fields"):
+            out["leaked_fields"] = ", ".join(lc["fields"])
+        return out or None
+    m = re.match(r"^Breach '(.+)' \((.+)\):", text)
+    if m:
+        title = m.group(1)
+        for b in mod.get("breaches") or []:
+            if isinstance(b, dict) and b.get("title") == title:
+                out = {"breach_date": b.get("breach_date")}
+                if b.get("pwn_count"):
+                    out["records"] = f"{b['pwn_count']:,}"
+                if b.get("domain"):
+                    out["source_domain"] = b["domain"]
+                return out
+    if "combo lists" in text:
+        samples = mod.get("combo_samples") or []
+        if samples:
+            return {"sample": ", ".join(str(s) for s in samples[:3])}
+    return None
+
+
+def _js_secrets_evidence(text: str, mod: dict) -> dict | None:
+    if not re.match(r"^JS bundle exposes \d+ API endpoints and \d+ cloud gateway hosts$", text):
+        return None
+    out: dict[str, Any] = {}
+    # Lists, not a pre-joined/truncated string: js_secrets already caps these at
+    # MAX_ENDPOINTS (50), so the full list is small enough to keep — the UI
+    # decides how much to show up front and expands to the rest on click.
+    paths = [e.get("path") for e in mod.get("endpoints") or [] if isinstance(e, dict) and e.get("path")]
+    if paths:
+        out["endpoints"] = paths
+    cloud = sorted({h.get("host") for h in mod.get("hosts") or []
+                   if isinstance(h, dict) and h.get("kind") == "cloud" and h.get("host")})
+    if cloud:
+        out["cloud_hosts"] = cloud
+    return out or None
+
+
+# Per-module extractors for the structured context behind a one-line finding
+# (the persisted Finding.text is just that line). Each receives the line and
+# the module's own full result dict; None means "nothing extra to show".
+FINDING_EVIDENCE_RULES: dict[str, Callable[[str, dict], dict | None]] = {
+    "breach": _breach_evidence,
+    "smart_fuzz": lambda text, mod: _path_evidence(text, mod, ("paths_found",)),
+    "admin": lambda text, mod: _path_evidence(text, mod, ("found", "restricted")),
+    "exposed": lambda text, mod: _path_evidence(text, mod, ("exposed",)),
+    "js_secrets": _js_secrets_evidence,
+}
+
+# The agent tags each finding with the tool that produced it ("[mine_js] JS
+# bundle exposes..."), and that tool's own result — the only place the
+# structured data behind the line lives — is never persisted anywhere except
+# a bounded copy the agent stashes on its own step (see agent_scan._step_evidence).
+# Reuses the same rules a direct module run would use, since the tools wrap
+# those same modules (mine_js -> js_secrets, fuzz_paths -> smart_fuzz, ...).
+_AGENT_FINDING_RE = re.compile(r"^\[(\w+)\] (.*)$", re.DOTALL)
+_AGENT_TOOL_EVIDENCE_RULES: dict[str, Callable[[str, dict], dict | None]] = {
+    "mine_js": _js_secrets_evidence,
+    "fuzz_paths": lambda text, mod: _path_evidence(text, mod, ("paths_found",)),
+    "probe_sensitive_files": lambda text, mod: _path_evidence(text, mod, ("exposed", "admin_panels")),
+}
+
+
+def _agent_step_for(text: str, result: dict) -> tuple[str, dict] | None:
+    """(tool, step) for the agent step that produced this exact finding line,
+    or None if the line isn't agent-tagged or its step wasn't kept."""
+    m = _AGENT_FINDING_RE.match(text)
+    if not m:
+        return None
+    tool, rest = m.group(1), m.group(2)
+    for step in result.get("agent_steps") or []:
+        if step.get("tool") == tool and rest in (step.get("new_findings") or []):
+            return tool, step
+    return None
+
+
+def _agent_finding_evidence(text: str, result: dict) -> dict | None:
+    found = _agent_step_for(text, result)
+    if found is None:
+        return None
+    tool, step = found
+    rule = _AGENT_TOOL_EVIDENCE_RULES.get(tool)
+    if rule is None:
+        return None
+    rest = _AGENT_FINDING_RE.match(text).group(2)
+    return rule(rest, step.get("evidence_source") or {})
+
+
+def _finding_evidence(module: str, text: str, result: dict) -> dict | None:
+    try:
+        if module == "agent":
+            return _agent_finding_evidence(text, result)
+        rule = FINDING_EVIDENCE_RULES.get(module)
+        if rule is None:
+            return None
+        mod = (result.get("modules") or {}).get(module) or {}
+        return rule(text, mod)
+    except Exception:
+        logger.debug(f"Evidence extraction failed for {module}", exc_info=True)
+        return None
+
+
 # subdomain_eval prefixes each sub-finding with the specific host it came from
 # ("[carreras.example.com] Path discovered: ..."), unlike every other module,
 # which reports against the scan's own target — see _finding_host.
@@ -1102,15 +1259,20 @@ _BRACKETED_HOST_RE = re.compile(
 )
 
 
-def _finding_host(module: str, text: str, scan_target: str | None) -> str | None:
+def _finding_host(module: str, text: str, scan_target: str | None, result: dict | None = None) -> str | None:
     """The specific host a finding is about, when it can be told apart from
     `dom.domain` (the apex row it's filed under) — e.g. a fanned-out host scan's
-    target, or a subdomain_eval line's own bracketed host. None when a finding
-    isn't about one particular host (a "[secret verification] ..." line, or
-    subdomain_eval's own summary lines)."""
+    target, a subdomain_eval line's own bracketed host, or the target the
+    agent pointed a tool at. None when a finding isn't about one particular
+    host (a "[secret verification] ..." line, or subdomain_eval's own summary
+    lines)."""
     if module == "subdomain_eval":
         m = _BRACKETED_HOST_RE.match(text)
         return m.group(1) if m else None
+    if module == "agent" and result is not None:
+        found = _agent_step_for(text, result)
+        if found is not None:
+            return found[1].get("target") or scan_target or None
     return scan_target or None
 
 
@@ -1133,7 +1295,7 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         if not text:
             continue
         module = f.get("module") or "unknown"
-        host = _finding_host(module, text, scan_target)
+        host = _finding_host(module, text, scan_target, result)
         # The fingerprint identifies a finding by the host it is actually
         # about (falling back to the apex domain when no host is known) so
         # that two different fanned-out hosts reporting the identical text
@@ -1144,11 +1306,12 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         risk = f.get("risk") if f.get("risk") in FINDING_RISK_LEVELS else "low"
         category = f.get("category") or _finding_category(module, f.get("finding"))
         frameworks = compliance.frameworks_for(module, text)
+        evidence = _finding_evidence(module, text, result)
         existing = await Finding.get_or_none(domain_id=dom.id, fingerprint=fp)
         if existing is None:
             await Finding.create(
                 domain_id=dom.id, fingerprint=fp, module=module, text=text, host=host,
-                risk=risk, category=category, frameworks=frameworks,
+                risk=risk, category=category, frameworks=frameworks, evidence=evidence,
                 status="open",
                 first_seen_scan_id=scan_id, last_seen_scan_id=scan_id,
                 first_seen_at=now, last_seen_at=now,
@@ -1160,6 +1323,7 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         existing.category = category
         existing.frameworks = frameworks
         existing.host = host
+        existing.evidence = evidence
         if existing.status == "fixed":
             # A finding that was resolved (manually or automatically) is back
             # in the scan output — reopen it.
@@ -1770,11 +1934,19 @@ async def _insert_queued_scan(scan_id: str, domain: str, domain_id: int | None) 
 
 
 # ── Scheduler ──────────────────────────────────────────────────────────────────
+# Audit retention purge runs at most once every 24 h, on the scheduler tick.
+_last_audit_purge: datetime | None = None
+
+
 async def _scheduler_loop() -> None:
+    global _last_audit_purge
     while True:
         try:
             now = datetime.now(timezone.utc)
             settings = await _load_settings()
+            if _last_audit_purge is None or now - _last_audit_purge >= timedelta(hours=24):
+                await audit_log.purge(settings["audit_retention_days"])
+                _last_audit_purge = now
             if settings.get("vuln_scan_enabled", True):
                 due = await Schedule.filter(enabled=True, next_run_at__lte=now).select_related("domain")
                 for sched in due:
@@ -1957,13 +2129,16 @@ async def login(request: LoginRequest, req: Request):
     user = await User.get_or_none(email=request.email)
     if user is None or not user.active:
         verify_password(request.password, _DUMMY_PASSWORD_HASH)  # timing equalizer
+        await audit_log.record("auth.login_failed", detail={"email": request.email}, ip=client_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not verify_password(request.password, user.password_hash):
+        await audit_log.record("auth.login_failed", user, detail={"email": request.email}, ip=client_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     user.last_login_at = datetime.now(timezone.utc)
     await user.save()
     token = await issue_token(user)
     logger.info(f"User {user.email} logged in")
+    await audit_log.record("auth.login", user, ip=client_ip)
     return _session_payload(user, token)
 
 
@@ -1971,7 +2146,10 @@ async def login(request: LoginRequest, req: Request):
 async def logout(req: Request):
     token = bearer_token(req.headers)
     if token:
+        user = await resolve_token_user(token)
         await revoke_token(token)
+        await audit_log.record("auth.logout", user,
+                               ip=req.client.host if req.client else None)
     return {"message": "Logged out"}
 
 
@@ -2004,6 +2182,7 @@ async def bootstrap(request: BootstrapRequest):
         )
         token = await issue_token(user)
     logger.info(f"Bootstrap: created first admin {user.email}")
+    await audit_log.record("auth.bootstrap", user)
     return _session_payload(user, token)
 
 
@@ -2014,8 +2193,8 @@ async def list_users():
     return [_user_payload(u) for u in users]
 
 
-@app.post("/api/users", dependencies=[Depends(require_role("admin"))], status_code=201)
-async def create_user(request: UserCreateRequest):
+@app.post("/api/users", status_code=201)
+async def create_user(request: UserCreateRequest, current=Depends(require_role("admin"))):
     if await User.get_or_none(email=request.email) is not None:
         raise HTTPException(status_code=409, detail="Email already registered")
     user = await User.create(
@@ -2023,11 +2202,13 @@ async def create_user(request: UserCreateRequest):
         password_hash=hash_password(request.password),
         role=request.role,
     )
+    await audit_log.record("user.create", current, target=f"user:{user.email}",
+                           detail={"role": request.role})
     return _user_payload(user)
 
 
-@app.patch("/api/users/{user_id}", dependencies=[Depends(require_role("admin"))])
-async def update_user(user_id: int, request: UserUpdateRequest):
+@app.patch("/api/users/{user_id}")
+async def update_user(user_id: int, request: UserUpdateRequest, current=Depends(require_role("admin"))):
     user = await User.get_or_none(id=user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -2038,16 +2219,23 @@ async def update_user(user_id: int, request: UserUpdateRequest):
     if strips_admin and user.role == "admin" and user.active \
             and await _active_admin_count(exclude_id=user.id) == 0:
         raise HTTPException(status_code=400, detail="Cannot demote or deactivate the last admin")
-    if request.role is not None:
+    changed: dict[str, Any] = {}
+    if request.role is not None and request.role != user.role:
+        changed["role"] = f"{user.role} → {request.role}"
         user.role = request.role
-    if request.active is not None:
+    if request.active is not None and request.active != user.active:
+        changed["active"] = f"{user.active} → {request.active}"
         user.active = request.active
     if request.password is not None:
+        changed["password"] = "reset"  # the hash is never logged
         user.password_hash = hash_password(request.password)
     await user.save()
     if request.password is not None or request.active is False:
         # Password change or deactivation invalidates existing sessions.
         await revoke_user_tokens(user.id)
+    if changed:
+        await audit_log.record("user.update", current, target=f"user:{user.email}",
+                               detail=changed)
     return _user_payload(user)
 
 
@@ -2061,6 +2249,8 @@ async def delete_user(user_id: int, current=Depends(require_role("admin"))):
     if user.role == "admin" and user.active and await _active_admin_count(exclude_id=user.id) == 0:
         raise HTTPException(status_code=400, detail="Cannot delete the last admin")
     await user.delete()  # FK cascade removes their tokens
+    await audit_log.record("user.delete", current, target=f"user:{user.email}",
+                           detail={"role": user.role})
     return {"message": "Deleted"}
 
 
@@ -2100,6 +2290,10 @@ async def start_scan(request: ScanRequest, req: Request, user=Depends(require_ro
     )
     await _insert_queued_scan(scan_id, request.domain, domain_id)
     await scan_queue.enqueue(scan_id, request.domain, domain_id)
+    await audit_log.record("scan.start", user, target=f"domain:{request.domain}",
+                           detail={"scan_id": scan_id, "kind": kind,
+                                   "modules": request.modules or None},
+                           ip=client_ip)
     return ScanResponse(
         scan_id=scan_id,
         domain=request.domain,
@@ -2133,6 +2327,9 @@ async def start_agent_scan(request: AgentScanRequest, req: Request, user=Depends
     )
     await _insert_queued_scan(scan_id, request.domain, domain_id)
     await scan_queue.enqueue(scan_id, request.domain, domain_id)
+    await audit_log.record("scan.start", user, target=f"domain:{request.domain}",
+                           detail={"scan_id": scan_id, "kind": "agent", "mode": request.mode},
+                           ip=client_ip)
     return {"agent_scan_id": scan_id, "status": "running"}
 
 
@@ -2183,6 +2380,10 @@ async def start_host_scan(request: HostScanRequest, req: Request, user=Depends(r
     await _insert_queued_scan(scan_id, host, dom.id)
     await scan_queue.enqueue(scan_id, host, dom.id)
     logger.info(f"[{scan_id}] Host scan queued for {host} (parent domain {dom.domain})")
+    await audit_log.record("scan.start", user, target=f"host:{host}",
+                           detail={"scan_id": scan_id, "kind": "module" if request.modules else "host",
+                                   "modules": request.modules or None},
+                           ip=client_ip)
     return ScanResponse(
         scan_id=scan_id,
         domain=host,
@@ -2350,8 +2551,8 @@ async def list_scans(domain: str | None = Query(default=None)):
     return list(rows.values())
 
 
-@app.post("/api/scan/{scan_id}/stop", dependencies=[Depends(require_role("operator", "admin"))])
-async def stop_scan(scan_id: str):
+@app.post("/api/scan/{scan_id}/stop")
+async def stop_scan(scan_id: str, user=Depends(require_role("operator", "admin"))):
     """Request a graceful stop: the orchestrator checks the flag between modules
     and persists partial results as 'interrupted'. Queued scans are skipped by
     the worker when they surface."""
@@ -2361,6 +2562,8 @@ async def stop_scan(scan_id: str):
             raise HTTPException(status_code=409, detail="Scan is not running")
         scan["stop_requested"] = True
         logger.info(f"[{scan_id}] Stop requested by user")
+        await audit_log.record("scan.stop", user, target=f"scan:{scan_id}",
+                               detail={"domain": scan["domain"]})
         if scan["status"] == "queued":
             # Not started: nothing to wait for. Persist it now; the worker skips
             # it when it surfaces (waiting there could take hours behind a long queue).
@@ -2402,18 +2605,22 @@ async def restart_scan(scan_id: str, user=Depends(require_role("operator", "admi
     await _insert_queued_scan(new_id, domain, domain_id)
     await scan_queue.enqueue(new_id, domain, domain_id)
     logger.info(f"[{scan_id}] restarted as {new_id}")
+    await audit_log.record("scan.restart", user, target=f"domain:{domain}",
+                           detail={"scan_id": scan_id, "requeued_as": new_id})
     return ScanResponse(scan_id=new_id, domain=domain, message="Scan restarted. Poll /api/scan/{scan_id} for status.")
 
 
-@app.delete("/api/scan/{scan_id}", dependencies=[Depends(require_role("admin"))])
-async def delete_scan(scan_id: str):
+@app.delete("/api/scan/{scan_id}")
+async def delete_scan(scan_id: str, user=Depends(require_role("admin"))):
     if scan_id in SCANS:
         del SCANS[scan_id]
+        await audit_log.record("scan.delete", user, target=f"scan:{scan_id}")
         return {"message": "Deleted"}
     row = await Scan.get_or_none(id=scan_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     await row.delete()
+    await audit_log.record("scan.delete", user, target=f"scan:{scan_id}")
     return {"message": "Deleted"}
 
 
@@ -2642,12 +2849,13 @@ async def get_discovery(discovery_id: str):
 
 
 # ── Companies & domains ────────────────────────────────────────────────────────
-@app.post("/api/companies", dependencies=[Depends(require_role("operator", "admin"))])
-async def create_company(request: CompanyCreateRequest):
+@app.post("/api/companies")
+async def create_company(request: CompanyCreateRequest, user=Depends(require_role("operator", "admin"))):
     existing = await Company.get_or_none(name=request.name)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Company already exists")
     company = await Company.create(name=request.name)
+    await audit_log.record("company.create", user, target=f"company:{company.name}")
     settings = await _load_settings()
     discovery_id = None
     if settings["auto_discover_domains"]:
@@ -2708,8 +2916,9 @@ async def list_companies():
     return out
 
 
-@app.post("/api/companies/{company_id}/domains", dependencies=[Depends(require_role("operator", "admin"))])
-async def create_domain(company_id: int, request: DomainCreateRequest):
+@app.post("/api/companies/{company_id}/domains")
+async def create_domain(company_id: int, request: DomainCreateRequest,
+                        user=Depends(require_role("operator", "admin"))):
     company = await Company.get_or_none(id=company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -2737,20 +2946,23 @@ async def create_domain(company_id: int, request: DomainCreateRequest):
     )
     logger.info(f"Domain {dom.domain} added to company {company.id} with default schedule every {interval}h"
                 f" (agent_mode={settings['agent_mode_default']}, discovery={discover_on} every {discover_interval}h)")
+    await audit_log.record("domain.create", user, target=f"domain:{dom.domain}",
+                           detail={"company": company.name})
     return {"id": dom.id, "company_id": company.id, "domain": dom.domain, "created_at": dom.created_at}
 
 
-@app.delete("/api/domains/{domain_id}", dependencies=[Depends(require_role("admin"))])
-async def delete_domain(domain_id: int):
+@app.delete("/api/domains/{domain_id}")
+async def delete_domain(domain_id: int, user=Depends(require_role("admin"))):
     dom = await Domain.get_or_none(id=domain_id)
     if dom is None:
         raise HTTPException(status_code=404, detail="Domain not found")
     await dom.delete()  # FK cascade removes schedules/scans/subdomains/endpoints
+    await audit_log.record("domain.delete", user, target=f"domain:{dom.domain}")
     return {"message": "Deleted"}
 
 
-@app.delete("/api/companies/{company_id}", dependencies=[Depends(require_role("admin"))])
-async def delete_company(company_id: int):
+@app.delete("/api/companies/{company_id}")
+async def delete_company(company_id: int, user=Depends(require_role("admin"))):
     company = await Company.get_or_none(id=company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -2762,6 +2974,7 @@ async def delete_company(company_id: int):
         raise HTTPException(status_code=409, detail=f"Scans in flight for: {', '.join(busy)} — wait or delete them first")
     await company.delete()  # FK cascade removes domains → scans/assets/schedules
     logger.info(f"Company {company_id} ({company.name}) deleted")
+    await audit_log.record("company.delete", user, target=f"company:{company.name}")
     return {"message": "Deleted"}
 
 
@@ -2831,6 +3044,7 @@ def _serialize_finding(rec: Finding) -> dict:
         "module": rec.module,
         "text": rec.text,
         "host": rec.host,
+        "evidence": rec.evidence,
         "risk": rec.risk,
         "category": rec.category,
         "frameworks": rec.frameworks or [],
@@ -2920,6 +3134,7 @@ async def update_finding_status(
     rec = await Finding.get_or_none(id=finding_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="Finding not found")
+    old_status = rec.status
     rec.status = status
     if status == "fixed":
         if rec.fixed_at is None:
@@ -2930,7 +3145,76 @@ async def update_finding_status(
         rec.notes = request.notes
     await rec.save()
     logger.info(f"Finding #{rec.id} status -> {status} by {getattr(user, 'email', user)}")
+    if old_status != status:
+        await audit_log.record("finding.status", user, target=f"finding:{rec.id}",
+                               detail={"from": old_status, "to": status,
+                                       "module": rec.module, "text": rec.text})
     return _serialize_finding(rec)
+
+
+@app.get("/api/leakcheck/query")
+async def leakcheck_query(term: str, user=Depends(require_role("operator", "admin"))):
+    """On-demand lookup of one email/username against LeakCheck's paid API —
+    the actual leaked records behind a breach finding's aggregate count.
+    Manual only (never runs during a scan) and never persisted: the result is
+    returned straight to the caller and nothing is written to the database."""
+    logger.info(f"LeakCheck manual query by {getattr(user, 'email', user)} (term redacted)")
+    result = await asyncio.to_thread(breach_check.query_leakcheck, term)
+    # The term itself is never persisted — only a one-way fingerprint, so the
+    # trail shows who looked something up and how it went, not what they
+    # looked up.
+    await audit_log.record("leakcheck.query", user,
+                           detail={"term_hash": audit_log.redact_term(term),
+                                   "result": result.get("status")})
+    if result.get("status") == "error" and result.get("error") == "invalid_term":
+        raise HTTPException(status_code=400, detail="term must be an email address or a username")
+    return result
+
+
+# ── Audit log ──────────────────────────────────────────────────────────────────
+def _serialize_audit_event(rec: AuditEvent) -> dict:
+    return {
+        "id": rec.id,
+        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+        # "" means a system action (scheduler, startup) — shown as such in the UI
+        "user_email": rec.user_email or None,
+        "action": rec.action,
+        "target": rec.target,
+        "detail": rec.detail,
+        "ip": rec.ip,
+    }
+
+
+@app.get("/api/audit")
+async def list_audit_events(
+    action: str | None = Query(default=None),
+    user_email: str | None = Query(default=None),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    limit: int = Query(default=50, le=200),
+    offset: int = Query(default=0, ge=0),
+    user=Depends(require_role("operator", "admin")),
+):
+    """Newest-first audit trail with filters. Read-only for operators; the
+    trail itself is written only as a side effect of the audited actions."""
+    q = AuditEvent.all()
+    if action:
+        q = q.filter(action=action.strip())
+    if user_email:
+        q = q.filter(user_email__icontains=user_email.strip())
+    if since:
+        q = q.filter(created_at__gte=since)
+    if until:
+        q = q.filter(created_at__lte=until)
+    total = await q.count()
+    rows = await q.order_by("-created_at", "-id").offset(offset).limit(limit)
+    # Distinct actions ever recorded, for the filter dropdown
+    actions = await AuditEvent.all().order_by("action").distinct().values_list("action", flat=True)
+    return {
+        "total": total,
+        "actions": list(actions),
+        "events": [_serialize_audit_event(r) for r in rows],
+    }
 
 
 @app.get("/api/companies/{company_id}/compliance")
@@ -4304,6 +4588,7 @@ class SettingsUpdateRequest(BaseModel):
     ai_domain_suggestions: bool | None = None
     constellation_enabled: bool | None = None
     user_agent: str | None = None
+    audit_retention_days: int | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
     tools_katana: bool | None = None
@@ -4382,8 +4667,8 @@ async def get_settings():
     return _settings_payload(await _load_settings())
 
 
-@app.put("/api/settings", dependencies=[Depends(require_role("admin"))])
-async def update_settings(request: SettingsUpdateRequest):
+@app.put("/api/settings")
+async def update_settings(request: SettingsUpdateRequest, user=Depends(require_role("admin"))):
     if request.enabled_modules is not None:
         unknown = sorted(set(request.enabled_modules) - set(SCAN_MODULE_NAMES))
         if unknown:
@@ -4410,6 +4695,7 @@ async def update_settings(request: SettingsUpdateRequest):
         "ai_domain_suggestions": request.ai_domain_suggestions,
         "constellation_enabled": request.constellation_enabled,
         "user_agent": request.user_agent,
+        "audit_retention_days": request.audit_retention_days,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,
         "tools_katana": request.tools_katana,
@@ -4420,6 +4706,10 @@ async def update_settings(request: SettingsUpdateRequest):
         if value is None:
             continue
         await AppSetting.update_or_create(key=key, defaults={"value": value})
+    changed_keys = sorted(k for k, v in updates.items() if v is not None)
+    if changed_keys:
+        # Keys only — values may reveal internal tuning and add no audit value.
+        await audit_log.record("settings.update", user, detail={"keys": ", ".join(changed_keys)})
     return _settings_payload(await _load_settings())
 
 

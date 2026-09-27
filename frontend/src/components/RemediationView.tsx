@@ -4,11 +4,13 @@ import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import {
   ArrowLeft,
+  Bot,
   Check,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
   RefreshCw,
+  Search,
   ShieldCheck,
   Undo2,
 } from 'lucide-react'
@@ -23,6 +25,10 @@ export interface RemediationFinding {
    * below, when it came from a fanned-out host scan); null when no single
    * host applies (e.g. a secret-verification note). */
   host: string | null
+  /** Extra structured context the module's own result had (e.g. a leak
+   * source, an HTTP status/size, a response snippet) — plain key/value,
+   * shown in the expanded row when the one-line text isn't enough. */
+  evidence: Record<string, string | number | string[]> | null
   risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category: string
   frameworks: string[]
@@ -61,10 +67,140 @@ interface Props {
   onBack: () => void
 }
 
+interface LeakcheckResult {
+  status: 'ok' | 'not_configured' | 'error'
+  found?: number
+  records?: Record<string, unknown>[]
+  error?: string
+}
+
+// One row's worth of manual LeakCheck lookup state, keyed by finding id so
+// each expanded row remembers its own term/result independently.
+function LeakcheckLookup({ available }: { available: boolean }) {
+  const { t } = useTranslation()
+  const [term, setTerm] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<LeakcheckResult | null>(null)
+
+  const run = async () => {
+    const clean = term.trim()
+    if (!clean) return
+    setLoading(true)
+    setResult(null)
+    try {
+      const { data } = await axios.get<LeakcheckResult>('/api/leakcheck/query', { params: { term: clean } })
+      setResult(data)
+    } catch (err) {
+      setResult({ status: 'error', error: axios.isAxiosError(err) ? err.response?.data?.detail || err.message : String(err) })
+    }
+    setLoading(false)
+  }
+
+  if (!available) {
+    return <p className="text-[11px] text-dark-500 italic">{t('remediation.leakcheck.unavailable')}</p>
+  }
+
+  return (
+    <div className="rounded-md bg-dark-900/50 border border-dark-800 px-3 py-2 mt-1 space-y-2">
+      <div className="flex items-center gap-1.5">
+        <Search className="w-3.5 h-3.5 text-dark-500 shrink-0" />
+        <span className="text-[11px] text-dark-500">{t('remediation.leakcheck.label')}</span>
+      </div>
+      <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="text"
+          value={term}
+          onChange={(e) => setTerm(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') run() }}
+          placeholder={t('remediation.leakcheck.placeholder')}
+          spellCheck={false}
+          className="flex-1 min-w-0 bg-white border border-dark-700 rounded-lg px-2.5 py-1 text-xs font-mono text-dark-200 placeholder:text-dark-600 focus:outline-none focus:border-cyber-500"
+        />
+        <button
+          onClick={run}
+          disabled={loading || !term.trim()}
+          className="btn-secondary text-[11px] px-2.5 py-1 disabled:opacity-50 disabled:cursor-wait"
+        >
+          {loading ? t('common.loading') : t('remediation.leakcheck.check')}
+        </button>
+      </div>
+      <p className="text-[10px] text-dark-600">{t('remediation.leakcheck.disclaimer')}</p>
+      {result?.status === 'not_configured' && (
+        <p className="text-[11px] text-amber-600">{t('remediation.leakcheck.notConfigured')}</p>
+      )}
+      {result?.status === 'error' && (
+        <p className="text-[11px] text-red-600">{t('remediation.leakcheck.error', { msg: result.error })}</p>
+      )}
+      {result?.status === 'ok' && (result.found ?? 0) === 0 && (
+        <p className="text-[11px] text-emerald-600">{t('remediation.leakcheck.clean')}</p>
+      )}
+      {result?.status === 'ok' && (result.records ?? []).length > 0 && (
+        <div className="space-y-1.5">
+          {(result.records ?? []).map((rec, i) => (
+            <dl key={i} className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 border border-dark-800 rounded px-2 py-1.5">
+              {Object.entries(rec).map(([key, value]) => (
+                <Fragment key={key}>
+                  <dt className="text-dark-500 whitespace-nowrap">{key}</dt>
+                  <dd className="text-dark-200 font-mono break-all">
+                    {typeof value === 'object' ? JSON.stringify(value) : String(value)}
+                  </dd>
+                </Fragment>
+              ))}
+            </dl>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 type StatusFilter = 'all' | 'open' | 'accepted' | 'fixed'
 type CategoryFilter = 'all' | 'vulnerability' | 'misconfiguration' | 'exposure' | 'info'
 
 type Row = RemediationFinding & { domain: string }
+
+// The agent tags each finding with the tool that produced it ("[mine_js] JS
+// bundle exposes..."); split that off so the text reads naturally and the
+// tool becomes its own badge instead of bracket noise in the sentence.
+const AGENT_TOOL_RE = /^\[(\w+)\] (.*)$/s
+function splitAgentTool(module: string, text: string): { tool: string | null; text: string } {
+  if (module !== 'agent') return { tool: null, text }
+  const m = AGENT_TOOL_RE.exec(text)
+  return m ? { tool: m[1], text: m[2] } : { tool: null, text }
+}
+
+/** One evidence value: a short list inlines, a longer one collapses behind
+ * "+N more"; a plain scalar just renders as text. */
+function EvidenceValue({ value }: { value: string | number | string[] }) {
+  const { t } = useTranslation()
+  const [expanded, setExpanded] = useState(false)
+  if (!Array.isArray(value)) return <>{value}</>
+  const shown = expanded ? value : value.slice(0, 8)
+  const hidden = value.length - shown.length
+  return (
+    <span>
+      {shown.join(', ')}
+      {hidden > 0 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setExpanded(true) }}
+          className="ml-1 text-cyber-700 hover:underline font-sans"
+        >
+          {t('remediation.evidenceMore', { count: hidden })}
+        </button>
+      )}
+      {expanded && value.length > 8 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setExpanded(false) }}
+          className="ml-1 text-cyber-700 hover:underline font-sans"
+        >
+          {t('remediation.evidenceLess')}
+        </button>
+      )}
+    </span>
+  )
+}
 
 const STATUS_STYLE: Record<string, string> = {
   open: 'bg-red-50 text-red-700 border-red-200',
@@ -81,6 +217,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
   const [data, setData] = useState<RemediationsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [leakcheckAvailable, setLeakcheckAvailable] = useState(false)
   const [filter, setFilter] = useState<StatusFilter>('open')
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
   const [page, setPage] = useState(1)
@@ -101,6 +238,12 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
 
   useEffect(() => { load() }, [company.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    axios.get<{ leakcheck?: { configured: boolean } }>('/api/settings')
+      .then(({ data }) => setLeakcheckAvailable(data.leakcheck?.configured === true))
+      .catch(() => setLeakcheckAvailable(false))
+  }, [])
+
   const rows = useMemo<Row[]>(() => {
     if (!data) return []
     return data.domains.flatMap((d) => d.findings.map((f) => ({ ...f, domain: d.domain })))
@@ -115,11 +258,12 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
   const updateStatus = async (row: Row, status: 'accepted' | 'fixed' | 'open') => {
+    const plainText = splitAgentTool(row.module, row.text).text.slice(0, 120)
     const confirmMsg = status === 'fixed'
-      ? t('remediation.confirmFixed', { text: row.text.slice(0, 120) })
+      ? t('remediation.confirmFixed', { text: plainText })
       : status === 'accepted'
-        ? t('remediation.confirmAccept', { text: row.text.slice(0, 120) })
-        : t('remediation.confirmReopen', { text: row.text.slice(0, 120) })
+        ? t('remediation.confirmAccept', { text: plainText })
+        : t('remediation.confirmReopen', { text: plainText })
     if (!window.confirm(confirmMsg)) return
     setBusy(row.id)
     try {
@@ -280,7 +424,9 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                 </tr>
               </thead>
               <tbody className="divide-y divide-dark-800">
-                {pageItems.map((row) => (
+                {pageItems.map((row) => {
+                  const agentTag = splitAgentTool(row.module, row.text)
+                  return (
                   <Fragment key={row.id}>
                     <tr
                       onClick={() => setExpanded(expanded === row.id ? null : row.id)}
@@ -302,13 +448,23 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                       </td>
                       <td className="px-3 py-2 text-xs text-dark-200 max-w-md">
                         <span className="line-clamp-2">
-                          <LinkifyText text={row.text} baseUrl={`https://${row.host ?? row.domain}`} />
+                          <LinkifyText text={agentTag.text} baseUrl={`https://${row.host ?? row.domain}`} />
                         </span>
                       </td>
                       <td className="px-3 py-2">
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 font-mono whitespace-nowrap">
-                          {row.module}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-1">
+                          {agentTag.tool && (
+                            <span
+                              title={t('remediation.agentFoundThis')}
+                              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border bg-violet-50 text-violet-700 border-violet-200 whitespace-nowrap"
+                            >
+                              <Bot className="w-3 h-3" /> {t('remediation.agent')}
+                            </span>
+                          )}
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full border bg-dark-900 text-dark-500 border-dark-700 font-mono whitespace-nowrap">
+                            {agentTag.tool ?? row.module}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-3 py-2 text-xs font-mono text-dark-300 whitespace-nowrap">
                         {row.host && row.host !== row.domain ? (
@@ -370,14 +526,30 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                       <tr key={`${row.id}-detail`} className="bg-dark-900/30">
                         <td colSpan={readOnly ? 10 : 11} className="px-6 py-3">
                           <div className="text-xs space-y-1.5">
+                            {agentTag.tool && (
+                              <p className="inline-flex items-center gap-1 text-[11px] text-violet-700">
+                                <Bot className="w-3.5 h-3.5" /> {t('remediation.agentFoundThis')}
+                              </p>
+                            )}
                             <p className="text-dark-200 leading-relaxed">
-                              <LinkifyText text={row.text} baseUrl={`https://${row.host ?? row.domain}`} />
+                              <LinkifyText text={agentTag.text} baseUrl={`https://${row.host ?? row.domain}`} />
                             </p>
                             {row.host && (
                               <p className="text-dark-500">
                                 {t('remediation.col.host')}: <span className="font-mono text-dark-300">{row.host}</span>
                                 {row.host !== row.domain && <span> ({t('remediation.hostVsDomain', { domain: row.domain })})</span>}
                               </p>
+                            )}
+                            {row.module === 'breach' && <LeakcheckLookup available={leakcheckAvailable} />}
+                            {row.evidence && Object.keys(row.evidence).length > 0 && (
+                              <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 rounded-md bg-dark-900/50 border border-dark-800 px-3 py-2 mt-1">
+                                {Object.entries(row.evidence).map(([key, value]) => (
+                                  <Fragment key={key}>
+                                    <dt className="text-dark-500 whitespace-nowrap">{t(`remediation.evidence.${key}`, { defaultValue: key })}</dt>
+                                    <dd className="text-dark-200 font-mono break-all"><EvidenceValue value={value} /></dd>
+                                  </Fragment>
+                                ))}
+                              </dl>
                             )}
                             <div className="flex flex-wrap gap-x-6 gap-y-1 text-dark-500">
                               <span>{t('remediation.col.firstSeen')}: <span className="font-mono">{row.first_seen_at ? new Date(row.first_seen_at).toLocaleString() : '—'}</span></span>
@@ -393,7 +565,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                       </tr>
                     )}
                   </Fragment>
-                ))}
+                )})}
               </tbody>
             </table>
           </div>
