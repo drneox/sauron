@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see backend/.env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see .env.example)}
       POSTGRES_DB: asm
     ports:
       # Localhost-only: the DB is reachable from the host for dev tooling
@@ -25,10 +25,10 @@ services:
     container_name: sauron-backend
     restart: unless-stopped
     env_file:
-      - ./backend/.env
+      - ./.env
     environment:
       # Dentro de compose la DB se alcanza por nombre de servicio
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see backend/.env.example)}@db:5432/asm
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (see .env.example)}@db:5432/asm
     ports:
       - "8000:8000"
     depends_on:

@@ -39,9 +39,9 @@ Sauron mapea la huella externa de tu empresa (dominios, subdominios, IPs, puerto
 ## Inicio rápido
 
 ```bash
-# 1. Configura el backend
-cp backend/.env.example backend/.env
-#    OBLIGATORIO: define POSTGRES_PASSWORD (también en un .env raíz para compose),
+# 1. Configura (un solo archivo de entorno, en la raíz — lo usan compose y el backend)
+cp .env.example .env
+#    OBLIGATORIO: define POSTGRES_PASSWORD,
 #    mantén AUTH_ENABLED=true — luego AI_API_KEY / AI_BASE_URL / AI_MODEL, gate de red, …
 
 # 2. Levanta el stack
@@ -53,7 +53,9 @@ open http://localhost:5173
 
 Con `AUTH_ENABLED=true` y cero usuarios, la primera visita ofrece el **bootstrap**: creas el primer admin y entras. Los roles se gestionan luego desde **Users**.
 
-### Variables de entorno clave (`backend/.env`)
+> **¿Actualizas desde ≤1.1?** el antiguo `backend/.env` ya no se lee: muévelo a la raíz como `.env` (`mv backend/.env .env`).
+
+### Variables de entorno clave (`.env`)
 
 | Variable | Propósito |
 |---|---|
@@ -66,7 +68,7 @@ Con `AUTH_ENABLED=true` y cero usuarios, la primera visita ofrece el **bootstrap
 | `NOTIFY_WEBHOOK_URL` / `NOTIFY_ON` / `DASHBOARD_URL` | Notificaciones de deltas |
 | `SECURITYTRAILS_API_KEY` / `OTX_API_KEY` / `HIBP_API_KEY` / `HUNTER_API_KEY` / `GITHUB_TOKEN` | Fuentes opcionales de descubrimiento |
 
-La lista completa y anotada está en [`backend/.env.example`](backend/.env.example).
+La lista completa y anotada está en [`.env.example`](.env.example).
 
 ## Cómo funciona
 
