@@ -115,7 +115,7 @@ export default function AssetDetailView({ company, hostValue, readOnly = false, 
             onClick={scanHost}
             disabled={launching}
             className="px-4 py-1.5 bg-cyber-600 hover:bg-cyber-700 active:bg-cyber-800 text-white text-xs font-semibold rounded-lg transition-colors duration-150 inline-flex items-center gap-1.5 disabled:opacity-50"
-            title={t('hosts.detail.scanHostTitle')}
+            title={host?.kind === 'ip' ? t('hosts.detail.scanIpTitle') : t('hosts.detail.scanHostTitle')}
           >
             <ScanSearch className="w-3.5 h-3.5" />
             {launching ? t('hosts.detail.scanHostLaunching') : t('hosts.detail.scanHost')}

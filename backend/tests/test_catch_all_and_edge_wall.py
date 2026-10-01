@@ -48,6 +48,50 @@ class SpaCatchAllTests(unittest.TestCase):
         self.assertEqual(hit["path"], "/admin")
 
 
+class WafPatternBlockTests(unittest.TestCase):
+    """The WAF answers any path under /actuator or /admin with its 403 page,
+    while made-up root-level names go through."""
+
+    def run_probe(self, path):
+        block_page = lambda p: f"<html>Request unsuccessful. Incident {len(p)}{'x' * 650}</html>".encode()
+
+        async def fake_afetch(url, **kw):
+            p = "/" + url.split("/", 3)[3]
+            if p.startswith(("/admin", "/actuator", "/wp-admin")):
+                return resp(block_page(p), status=403)
+            return resp(b"<html>not found</html>", status=404)
+        with mock.patch.object(ad, "afetch", fake_afetch):
+            async def go():
+                baseline = await ad._calibrate(None, "https://x.example")
+                return await ad._probe(None, "https://x.example", path, baseline)
+            return asyncio.run(go())
+
+    def test_403_identical_to_decoy_is_ignored(self):
+        self.assertIsNone(self.run_probe("/actuator/health"))
+        self.assertIsNone(self.run_probe("/admin"))
+
+    def test_403_unlike_the_decoy_is_still_restricted(self):
+        async def fake_afetch(url, **kw):
+            p = "/" + url.split("/", 3)[3]
+            if p == "/console":
+                return resp(b"<html>Forbidden by app, " + b"y" * 3000 + b"</html>", status=403)
+            return resp(b"<html>not found</html>", status=404)
+        with mock.patch.object(ad, "afetch", fake_afetch):
+            async def go():
+                baseline = await ad._calibrate(None, "https://x.example")
+                return await ad._probe(None, "https://x.example", "/console", baseline)
+            hit = asyncio.run(go())
+        self.assertTrue(hit and hit["restricted"])
+
+
+class ProtectedNoteCategoryTests(unittest.TestCase):
+    def test_protected_note_is_info_not_exposure(self):
+        from scoring import finding_category
+        note = "1 path(s) blocked or redirected to login (protected, not exposed): /actuator/health"
+        self.assertEqual(finding_category("admin", note), "info")
+        self.assertEqual(finding_category("admin", "17 admin panel(s) confirmed: /admin"), "exposure")
+
+
 class ClusterTests(unittest.TestCase):
     def hit(self, path, size, status=200):
         return {"path": path, "status": status, "size": size, "severity": "high"}

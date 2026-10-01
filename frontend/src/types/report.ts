@@ -877,6 +877,9 @@ export interface HostAsset {
   apps: AppAsset[]
   neighbors: HostNeighbor[]
   risk: RiskLevel
+  /** Letter of the host's own latest scan; null = never scored on its own */
+  grade?: string | null
+  graded_at?: string | null
 }
 
 export interface HostsSummary {

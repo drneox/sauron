@@ -229,7 +229,17 @@ def _waf_finding_category(finding) -> str:
     return "exposure" if str(finding).startswith("No WAF") else "info"
 
 
+def _admin_finding_category(finding) -> str | None:
+    """"N path(s) blocked or redirected to login (protected, not exposed)" says
+    the opposite of an exposure: it is a note, not something to fix."""
+    text = finding.get("finding") if isinstance(finding, dict) else finding
+    if isinstance(text, str) and "protected, not exposed" in text:
+        return "info"
+    return None
+
+
 FINDING_CATEGORY_RULES = {
+    "admin": _admin_finding_category,
     "waf": _waf_finding_category,
     "whois": _whois_finding_category,
     "dns": _dns_finding_category,

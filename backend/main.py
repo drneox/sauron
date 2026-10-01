@@ -8,6 +8,7 @@ import asyncio
 import httpx
 import csv
 import hashlib
+import ipaddress
 import io
 import json
 import logging
@@ -265,6 +266,35 @@ DOMAIN_RE = re.compile(
 )
 
 
+def _public_ipv4(v: str) -> str | None:
+    """The address if `v` is a public IPv4, else None. Private, loopback,
+    link-local and reserved ranges are never scannable from here."""
+    try:
+        ip = ipaddress.ip_address(v.strip())
+    except ValueError:
+        return None
+    return str(ip) if ip.version == 4 and ip.is_global else None
+
+
+def _is_ip(v: str) -> bool:
+    try:
+        ipaddress.ip_address(v)
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_host_target(v: str) -> str:
+    """A hostname (as _normalize_domain) or a public IPv4 for an IP scan."""
+    bare = v.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
+    if _is_ip(bare):
+        ip = _public_ipv4(bare)
+        if ip is None:
+            raise ValueError(f"'{bare}' is not a public IPv4 address")
+        return ip
+    return _normalize_domain(v)
+
+
 def _normalize_domain(v: str) -> str:
     v = v.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
     if not DOMAIN_RE.match(v):
@@ -422,6 +452,10 @@ SKIP_ON_VULN_ONLY = {"whois", "subdomains", "reverse_ip", "mobile_apps"}
 # modules that evaluate a single host. Discovery-scope modules (subdomain enum,
 # whois, email, mobile apps, leaks, wayback...) don't apply to one host, and
 # the chained subdomain_eval step is skipped (host scans discover nothing new).
+# An IP has no name to resolve, no TLS name, no virtual host: only the modules
+# that work on the address itself make sense.
+IP_SCAN_MODULES = {"ports", "blacklist"}
+
 HOST_SCAN_MODULES = {
     "dns", "ssl", "tls", "headers", "cors", "cookies",
     "tech", "waf", "robots", "admin", "frontend_cve",
@@ -639,6 +673,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     SCANS[scan_id]["status"] = "running"
     kind = SCANS[scan_id].get("kind", "full")
     enabled_modules = (settings or {}).get("enabled_modules") or {}
+    host_modules = IP_SCAN_MODULES if _is_ip(domain) else HOST_SCAN_MODULES
     # Snapshot tools_* flags for this scan (context-local — safe with
     # SCAN_WORKERS > 1); modules consult them via tools_runner.tool_enabled().
     tools_runner.set_tool_flags(settings)
@@ -719,7 +754,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     for name, _func in all_modules:
         if kind == "discover" and name not in DISCOVER_MODULES:
             continue
-        if kind == "host" and name not in HOST_SCAN_MODULES:
+        if kind == "host" and name not in host_modules:
             continue
         if kind == "module" and name not in module_allowlist:
             continue
@@ -733,6 +768,16 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
     if SCANS[scan_id].get("agent_mode"):
         planned.append("agent")
     SCANS[scan_id]["planned_modules"] = planned
+    # AI work that follows the modules, so the progress view can say up front
+    # what will happen (the summary is part of the scan; triage runs in the
+    # background once the scan is saved).
+    post_steps: list[str] = []
+    if os.getenv("AI_API_KEY", "").strip():
+        if kind == "full" or (kind == "host" and SCANS[scan_id].get("agent_mode")):
+            post_steps.append("ai_summary")
+        if (settings or {}).get("triage_enabled"):
+            post_steps.append("triage")
+    SCANS[scan_id]["post_steps"] = post_steps
 
     # Concurrency cap: modules probe the SAME target, so an unbounded burst of
     # ~28 simultaneous requests would be both impolite and WAF-bait. This caps
@@ -744,7 +789,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         if kind == "discover" and name not in DISCOVER_MODULES:
             return
         # Host scans evaluate a single host: skip discovery-scope modules.
-        if kind == "host" and name not in HOST_SCAN_MODULES:
+        if kind == "host" and name not in host_modules:
             return
         # Module scans run only the explicitly requested modules.
         if kind == "module" and name not in module_allowlist:
@@ -1083,7 +1128,7 @@ async def _resolve_host_domain(host: str) -> Domain | None:
     no company view (Remediation, the report, the PDF) will ever show them."""
     candidates = list(await Domain.filter(domain=host))
     if not candidates:
-        assets = await Asset.filter(type="subdomain", value=host).prefetch_related("domain")
+        assets = await Asset.filter(type__in=["ip" if _is_ip(host) else "subdomain"], value=host).prefetch_related("domain")
         candidates = [a.domain for a in assets]
     if not candidates:
         return None
@@ -1534,7 +1579,7 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
 
     # Host scans refresh the scanned host's own subdomain asset in place
     # (fresh IPs from its DNS records; enum/merge blocks only run on full scans).
-    if result.get("kind") == "host" and target != dom.domain:
+    if result.get("kind") == "host" and target != dom.domain and not _is_ip(target):
         key = ("subdomain", target)
         meta = wanted.get(key)
         host_ips = sorted((dns_mod.get("records") or {}).get("A") or [])
@@ -1552,6 +1597,10 @@ def _extract_asset_candidates(dom: Domain, result: dict) -> dict[tuple[str, str]
             sources = set(meta.get("sources") or [])
             sources.add("host_scan")
             meta["sources"] = sorted(sources)
+
+    # An IP scan names no hostnames; keep the IP asset's own (see _upsert_assets).
+    if _is_ip(target) and apex_ip == target:
+        ip_hosts.setdefault(target, set())
 
     for ip, hosts in ip_hosts.items():
         wanted[("ip", ip)] = {
@@ -1675,6 +1724,8 @@ async def _upsert_assets(dom: Domain, result: dict, scan_id: str) -> None:
         key = (atype, value[:1024])
         rec = seen.get(key)
         if rec is not None:
+            if rec.type == "ip" and not meta.get("domains"):
+                meta = meta | {"domains": (rec.metadata or {}).get("domains") or []}
             if rec.type == "ip" and not meta.get("ports_scanned"):
                 old_ports = (rec.metadata or {}).get("open_ports")
                 if old_ports:
@@ -2423,8 +2474,9 @@ class HostScanRequest(BaseModel):
     @field_validator("host")
     @classmethod
     def validate_host(cls, v: str) -> str:
-        # IPs and garbage fail the hostname regex → 422 before we hit the DB.
-        return _normalize_domain(v)
+        # Garbage fails the hostname regex → 422 before we hit the DB; public
+        # IPv4s pass and get the IP module subset (see IP_SCAN_MODULES).
+        return _normalize_host_target(v)
 
     @field_validator("modules")
     @classmethod
@@ -2440,9 +2492,15 @@ async def start_host_scan(request: HostScanRequest, req: Request, user=Depends(r
     if request.modules and request.agent_mode:
         raise HTTPException(status_code=422, detail="agent_mode is not allowed for module scans")
     host = request.host
+    if _is_ip(host):
+        if request.agent_mode:
+            raise HTTPException(status_code=422, detail="agent_mode is not available for IP scans")
+        extra = sorted(set(request.modules or []) - IP_SCAN_MODULES)
+        if extra:
+            raise HTTPException(status_code=422, detail=f"Not available for IP scans: {', '.join(extra)}")
     dom = await _resolve_host_domain(host)
     if dom is None:
-        raise HTTPException(status_code=404, detail="Unknown host: not an inventoried domain or subdomain")
+        raise HTTPException(status_code=404, detail="Unknown host: not an inventoried domain, subdomain or IP")
     scan_id = _create_scan_entry(
         host, dom.id,
         agent_mode=False if request.modules else request.agent_mode,
@@ -2558,6 +2616,8 @@ async def get_scan(scan_id: str, req: Request):
                 payload["started_at"] = scan["started_at"]
             if scan.get("planned_modules") is not None:
                 payload["planned_modules"] = scan["planned_modules"]
+            if scan.get("post_steps") is not None:
+                payload["post_steps"] = scan["post_steps"]
             if scan.get("modules_done") is not None:
                 payload["modules_done"] = scan["modules_done"]
             if scan.get("agent_steps") is not None:
@@ -4108,6 +4168,8 @@ async def _collect_company_hosts(company: Company) -> dict:
                 "apps": [],
                 "neighbors": [],
                 "risk": "low",
+                "grade": None,
+                "graded_at": None,
             }
             if domain_id is not None:
                 host_domain[key] = domain_id
@@ -4280,6 +4342,20 @@ async def _collect_company_hosts(company: Company) -> dict:
     # 7) risk per host + final ordering (riskiest first, then alphabetical)
     for key, host in hosts.items():
         host["risk"] = _SEV_NAMES[risk_rank.get(key, 0)]
+    # Letter grade: only a host that was scored on its own has one — the latest
+    # completed host scan, or the domain's full scan for the apex. Hosts that
+    # only went through the chained evaluation stay ungraded (None), which
+    # reads as "not evaluated", not as a bad grade.
+    if dom_names:
+        async for sc in Scan.filter(domain_id__in=list(dom_names), status="completed",
+                                    kind__in=["host", "full"]).order_by("-completed_at").values(
+                "scan_target", "domain_id", "scorecard", "completed_at"):
+            target = (sc["scan_target"] or dom_names.get(sc["domain_id"], "")).lower()
+            host = hosts.get(target)
+            grade = (sc["scorecard"] or {}).get("grade")
+            # An IP scan runs two modules: its letter would say nothing.
+            if host is not None and host["kind"] != "ip" and host["grade"] is None and grade:
+                host["grade"], host["graded_at"] = grade, sc["completed_at"]
     ordered = sorted(hosts.values(), key=lambda h: (-risk_rank.get(h["value"].lower(), 0), h["value"]))
 
     open_port_count = len({(ip, p["port"]) for ip, ports in ip_ports.items() for p in ports})

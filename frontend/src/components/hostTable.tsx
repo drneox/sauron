@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { HostAsset, HostKind, WithCompany } from '../types/report'
 import { RiskBadge, pathUrl } from './ui'
+import { gradeChipColor } from './assetTable'
 import { SourceChip } from './assetTable'
 import { fmtShort, td, th } from './assetTable'
 import { ChevronDown } from 'lucide-react'
@@ -236,7 +237,7 @@ export function HostTable({ hosts, filter, search, showCompany = false }: {
     .filter((h) => !q || h.value.toLowerCase().includes(q)
       || (h.ips ?? []).some((ip) => ip.includes(q))
       || (h.technologies ?? []).some((tech) => tech.name.toLowerCase().includes(q)))
-  const cols = showCompany ? 9 : 8
+  const cols = showCompany ? 10 : 9
 
   return (
     <table className="w-full">
@@ -251,6 +252,7 @@ export function HostTable({ hosts, filter, search, showCompany = false }: {
           <th className={th} title={t('hosts.col.endpoints')}>{t('hosts.col.endpointsShort')}</th>
           <th className={th} title={t('hosts.col.panelsFiles')}>{t('hosts.col.panelsFilesShort')}</th>
           <th className={th}>{t('hosts.col.risk')}</th>
+          <th className={th} title={t('hosts.col.gradeTitle')}>{t('hosts.col.grade')}</th>
         </tr>
       </thead>
       <tbody className="divide-y divide-dark-800">
@@ -311,6 +313,18 @@ export function HostTable({ hosts, filter, search, showCompany = false }: {
                   </div>
                 </td>
                 <td className={td}><RiskBadge risk={h.risk} /></td>
+                <td className={td}>
+                  {h.grade ? (
+                    <span
+                      className={clsx('inline-flex items-center justify-center w-6 h-6 rounded-full border text-xs font-bold', gradeChipColor(h.grade))}
+                      title={h.graded_at ? new Date(h.graded_at).toLocaleDateString() : undefined}
+                    >
+                      {h.grade}
+                    </span>
+                  ) : (
+                    <span className="text-dark-600" title={t('hosts.col.notGraded')}>—</span>
+                  )}
+                </td>
               </tr>
               {open && (
                 <tr key={`${key}:detail`} className="bg-dark-900/40">

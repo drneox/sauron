@@ -32,6 +32,7 @@ import {
   ShieldAlert,
   Skull,
   Smartphone,
+  Sparkles,
   X,
   Zap,
 } from 'lucide-react'
@@ -157,6 +158,7 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
   const [agentSteps, setAgentSteps] = useState<AgentScanStep[]>([])
   const [agentPhaseSeen, setAgentPhaseSeen] = useState(false)
   const [plannedModules, setPlannedModules] = useState<string[] | null>(null)
+  const [postSteps, setPostSteps] = useState<string[]>([])
   const [modulesDone, setModulesDone] = useState<ModuleDone[]>([])
   const [elapsed, setElapsed] = useState(0)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -188,6 +190,7 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
           setDomain(data.domain ?? '')
           if (data.kind) setKind(data.kind)
           if (Array.isArray(data.planned_modules)) setPlannedModules(data.planned_modules)
+          if (Array.isArray(data.post_steps)) setPostSteps(data.post_steps)
           if (Array.isArray(data.modules_done)) setModulesDone(data.modules_done)
           if (data.phase === 'agent' || data.current_module === 'agent') {
             setAgentPhaseSeen(true)
@@ -346,6 +349,21 @@ export default function ScanProgress({ scanId, onComplete }: Props) {
               </div>
             )
           })}
+          {postSteps.length > 0 && (
+            <div className="px-3 py-2 rounded-lg border border-transparent">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                <span className="text-xs font-medium text-dark-500 flex-1">{t('scan.afterScan')}</span>
+              </div>
+              <ul className="mt-1.5 ml-6 space-y-1">
+                {postSteps.map((step) => (
+                  <li key={step} className="text-[11px] text-dark-500" title={t(`scan.post.${step}Desc`)}>
+                    {t(`scan.post.${step}`)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
 
         {/* Live feed */}

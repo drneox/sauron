@@ -141,6 +141,8 @@ async def _calibrate(client: httpx.AsyncClient, base_url: str) -> dict:
     homepage_hash   = None
     soft404_hashes: set[str] = set()
     soft404_sizes: list[int] = []
+    blocked_hashes: set[str] = set()
+    blocked_sizes: list[int] = []
 
     try:
         r = await afetch(base_url + "/", client=client, timeout=6)
@@ -158,8 +160,32 @@ async def _calibrate(client: httpx.AsyncClient, base_url: str) -> dict:
         except Exception:
             pass
 
+    # A WAF often blocks by NAME: anything under /admin or /actuator gets its
+    # 403 page whether or not the path exists, while the random names above
+    # sail through. Probing made-up paths under those prefixes shows that page.
+    for path in _DECOY_PATHS:
+        try:
+            r = await afetch(base_url + path, client=client, allow_redirects=False, timeout=5)
+            if r.status_code == 403:
+                blocked_hashes.add(_body_hash(_unreflect(r.content, path)))
+                blocked_sizes.append(len(r.content))
+        except Exception:
+            pass
+
     return {"homepage_hash": homepage_hash, "soft404_hashes": soft404_hashes,
-            "soft404_sizes": soft404_sizes}
+            "soft404_sizes": soft404_sizes,
+            "blocked_hashes": blocked_hashes, "blocked_sizes": blocked_sizes}
+
+
+_DECOY_PATHS = ("/admin/zz_notreal_91827", "/actuator/zz_notreal_91827", "/wp-admin/zz_notreal_91827")
+
+
+def _is_pattern_block(body: bytes, path: str, baseline: dict) -> bool:
+    """A 403 identical (or near-identical in size: block pages carry an
+    incident id) to the one a made-up path under the same prefix gets."""
+    if _body_hash(_unreflect(body, path)) in baseline.get("blocked_hashes", ()):
+        return True
+    return any(_near(len(body), n) for n in baseline.get("blocked_sizes") or [])
 
 
 def _severity(path: str, status: int) -> str:
@@ -198,6 +224,8 @@ async def _probe(client: httpx.AsyncClient, base_url: str, path: str, baseline: 
         if bh in baseline["soft404_hashes"]:
             return None
         if baseline["homepage_hash"] and bh == baseline["homepage_hash"]:
+            return None
+        if _is_pattern_block(body, path, baseline):
             return None
         # 403 = blocked/forbidden, not an exposed panel — informational only,
         # kept out of `found` so it never shows up as a positive admin panel

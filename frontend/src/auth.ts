@@ -48,9 +48,28 @@ axios.interceptors.request.use((config) => {
   return config
 })
 
+// FastAPI answers validation failures (422) with `detail` as a list of objects.
+// Screens render `detail` as text, and a list of objects crashes React (#31),
+// so flatten it into a readable string once, here.
+function flattenValidationDetail(detail: unknown): string | null {
+  if (!Array.isArray(detail)) return null
+  const parts = detail.map((d) => {
+    if (typeof d === 'string') return d
+    const item = d as { loc?: unknown[]; msg?: string }
+    const field = Array.isArray(item.loc) ? item.loc.filter((x) => x !== 'body').join('.') : ''
+    const msg = (item.msg ?? 'invalid value').replace(/^Value error, /, '')
+    return field ? `${field}: ${msg}` : msg
+  })
+  return parts.join('; ')
+}
+
 axios.interceptors.response.use(
   (response) => response,
   (error) => {
+    if (axios.isAxiosError(error) && error.response?.data && typeof error.response.data === 'object') {
+      const flat = flattenValidationDetail((error.response.data as { detail?: unknown }).detail)
+      if (flat !== null) (error.response.data as { detail?: unknown }).detail = flat
+    }
     if (axios.isAxiosError(error) && error.response?.status === 401) {
       // Edge gate (HTTP Basic): browsers don't show the native dialog for XHR
       // 401s — force a full-page navigation so it pops and caches the creds.
