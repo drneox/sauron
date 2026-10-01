@@ -210,6 +210,27 @@ def drop_edge_wall(open_ports: list[dict]) -> tuple[list[dict], list[dict]]:
     return kept, dropped
 
 
+_HTTP_5XX = re.compile(r"^HTTP/\d(?:\.\d)?\s+5\d\d\b")
+
+
+def drop_proxy_echo(open_ports: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, dropped). A front proxy (Imperva, CloudFront...) listens on 80,
+    443 and a few alternates and answers them all with the same error page —
+    e.g. 503 on 8080 and 8888. Such a port is the proxy again, not a Jupyter
+    or an app server, so a non-standard port repeating port 80's 5xx status
+    line is dropped instead of being named after its number."""
+    front = next((p for p in open_ports if p["port"] == 80 and p.get("banner")), None)
+    if front is None:
+        return open_ports, []
+    first = (front["banner"].splitlines() or [""])[0].strip()
+    if not _HTTP_5XX.match(first):
+        return open_ports, []
+    echo = [p for p in open_ports
+            if p["port"] not in _WEB_PORTS and (p.get("banner") or "").strip().splitlines()[:1] == [first]]
+    kept = [p for p in open_ports if p not in echo]
+    return kept, echo
+
+
 def run(domain: str) -> dict[str, Any]:
     try:
         ip = socket.gethostbyname(domain)
@@ -241,6 +262,8 @@ def run(domain: str) -> dict[str, Any]:
 
     open_ports.sort(key=lambda x: x["port"])
     open_ports, wall_dropped = drop_edge_wall(open_ports)
+    open_ports, echo_dropped = drop_proxy_echo(open_ports)
+    wall_dropped = wall_dropped + echo_dropped
     if wall_dropped:
         logger.info(f"[ports] {domain} ({ip}): {len(wall_dropped)} silent ports ignored "
                     "(CDN/WAF edge or tarpit accepting any connection)")

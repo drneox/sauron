@@ -137,5 +137,28 @@ class EdgeWallTests(unittest.TestCase):
         self.assertEqual(ps.drop_edge_wall(ports), (ports, []))
 
 
+class ProxyEchoTests(unittest.TestCase):
+    page = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html"
+
+    def test_alternate_ports_repeating_the_front_503_are_dropped(self):
+        ports = [port(80, self.page), port(443), port(8080, self.page), port(8888, self.page)]
+        kept, dropped = ps.drop_proxy_echo(ports)
+        self.assertEqual([p["port"] for p in kept], [80, 443])
+        self.assertEqual(sorted(p["port"] for p in dropped), [8080, 8888])
+
+    def test_different_answer_on_the_alternate_port_is_kept(self):
+        ports = [port(80, self.page), port(8888, "HTTP/1.1 200 OK\r\nServer: Jupyter")]
+        self.assertEqual(ps.drop_proxy_echo(ports), (ports, []))
+
+    def test_healthy_front_is_never_an_echo(self):
+        ok = "HTTP/1.1 200 OK\r\nServer: nginx"
+        ports = [port(80, ok), port(8080, ok)]
+        self.assertEqual(ps.drop_proxy_echo(ports), (ports, []))
+
+    def test_no_port_80_banner_means_no_echo_rule(self):
+        ports = [port(8080, self.page)]
+        self.assertEqual(ps.drop_proxy_echo(ports), (ports, []))
+
+
 if __name__ == "__main__":
     unittest.main()
