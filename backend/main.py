@@ -33,6 +33,10 @@ load_dotenv()
 from modules import pdf_report
 from version import __version__
 from host_priority import host_priority
+import finding_scope
+import domain_merge
+import finding_fingerprint
+import learned_paths
 from scoring import (
     CATEGORY_SCORE_WEIGHT,
     DEFAULT_FINDING_CATEGORY,
@@ -88,8 +92,9 @@ from modules import (
     proxy_pool,
 )
 
-from db import AppSetting, Asset, AssetHistory, AuditEvent, Company, Domain, Endpoint, Finding, Scan, Schedule, Subdomain, User, close_db, init_db
+from db import AppSetting, Asset, AssetHistory, AuditEvent, Company, Domain, Endpoint, Finding, LearnedPath, Scan, Schedule, Subdomain, User, close_db, init_db
 from modules import compliance
+from modules import triage
 from modules.common import (
     DEFAULT_USER_AGENT, MAX_USER_AGENT_LEN, clean_user_agent, set_user_agent,
 )
@@ -213,6 +218,10 @@ async def lifespan(app: FastAPI):
     upgraded = await hash_legacy_tokens()
     if upgraded:
         logger.info(f"Migrated {upgraded} legacy plaintext auth token(s) to sha256 at rest")
+    try:
+        await finding_fingerprint.ensure_current()
+    except Exception:
+        logger.exception("Finding fingerprint re-keying failed (will retry on next start)")
     to_requeue = await _recover_interrupted_scans()
     await scan_queue.start(_run_and_persist_scan)
     for new_id, target, domain_id in to_requeue:
@@ -447,7 +456,7 @@ SETTINGS_KEYS = ("enabled_modules", "agent_default_steps", "default_interval_hou
                  "discovery_enabled", "vuln_scan_enabled",
                  "default_discover_interval_hours", "skip_discovery_default",
                  "ai_domain_suggestions", "constellation_enabled", "user_agent",
-                 "audit_retention_days")
+                 "audit_retention_days", "triage_enabled", "learned_auto_approve")
 DEFAULT_AGENT_STEPS = 15
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_AUDIT_RETENTION_DAYS = 90
@@ -525,6 +534,12 @@ def _merge_settings(stored: dict[str, Any]) -> dict[str, Any]:
         "default_discover_interval_hours": discover_interval if isinstance(discover_interval, int) and discover_interval >= 1 else DEFAULT_DISCOVER_INTERVAL_HOURS,
         "skip_discovery_default": skip_discovery_default if isinstance(skip_discovery_default, bool) else False,
         "ai_domain_suggestions": ai_domain_suggestions if isinstance(ai_domain_suggestions, bool) else False,
+        # AI triage of path findings after each scan (suggestions only). Off by
+        # default: it sends short redacted response snippets to the AI provider.
+        "triage_enabled": stored.get("triage_enabled") is True,
+        # Learned paths proven generic skip the approval queue. Off: a person
+        # approves what gets probed against every client.
+        "learned_auto_approve": stored.get("learned_auto_approve") is True,
         "constellation_enabled": stored.get("constellation_enabled") is True,
         # Days audit events are kept before the scheduler purges them
         "audit_retention_days": stored.get("audit_retention_days")
@@ -653,7 +668,8 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
         known = [p for p in known if p]
         max_req = (settings or {}).get("smart_fuzz_max_requests") or DEFAULT_SMART_FUZZ_MAX_REQUESTS
         return smart_fuzz.run(d, wordlist="auto", max_requests=max_req,
-                              tech_hints=tech_hints, known_endpoints=known[:50])
+                              tech_hints=tech_hints, known_endpoints=known[:50],
+                              extra_paths=(settings or {}).get("learned_paths") or None)
 
     # Tier 0: every module here is independent of every other — none reads
     # another module's `results` entry — so they can all run concurrently.
@@ -956,6 +972,11 @@ async def _run_and_persist_scan(scan_id: str, domain: str, domain_id: int | None
     # Settings and per-domain config are read here (async) and handed to the
     # sync orchestrator thread, which has no DB access.
     settings = await _load_settings()
+    try:
+        settings["learned_paths"] = await learned_paths.approved_paths()
+    except Exception:
+        logger.exception(f"[{scan_id}] Could not load learned paths (scanning without them)")
+        settings["learned_paths"] = []
     if scan_id in SCANS:
         SCANS[scan_id]["app_developers"] = dom.app_developers or []
         # Baseline for chained evaluation: subdomains seen by the last completed
@@ -1053,6 +1074,23 @@ async def _get_or_create_domain(company_id: int | None, domain: str) -> Domain:
     return await Domain.create(company_id=company_id, domain=domain)
 
 
+async def _resolve_host_domain(host: str) -> Domain | None:
+    """The Domain row that owns `host` — as an apex itself, or via a
+    subdomain Asset of it. When duplicate rows exist for the same string
+    (an orphan quick scan alongside a company-owned one — see
+    _get_or_create_domain), prefers the company-owned row: picking either
+    one arbitrarily can attach a fresh scan's results to the orphan, where
+    no company view (Remediation, the report, the PDF) will ever show them."""
+    candidates = list(await Domain.filter(domain=host))
+    if not candidates:
+        assets = await Asset.filter(type="subdomain", value=host).prefetch_related("domain")
+        candidates = [a.domain for a in assets]
+    if not candidates:
+        return None
+    owned = [d for d in candidates if d.company_id is not None]
+    return max(owned or candidates, key=lambda d: d.id)
+
+
 def _extract_subdomains(result: dict) -> set[str]:
     subs = (result.get("modules", {}).get("subdomains") or {}).get("subdomains") or []
     return {s.get("subdomain") for s in subs if isinstance(s, dict) and s.get("subdomain")}
@@ -1094,12 +1132,11 @@ def _finding_text(finding) -> str:
         return str(finding)
 
 
-def _finding_fingerprint(domain: str, module: str, text: str) -> str:
-    """Stable identity of a finding across scans: sha1 of
-    domain|module|normalized-text. Normalization collapses whitespace so
-    cosmetic formatting differences don't spawn duplicate rows."""
-    normalized = re.sub(r"\s+", " ", text).strip()
-    return hashlib.sha1(f"{domain}|{module}|{normalized}".encode("utf-8")).hexdigest()
+def _finding_fingerprint(host: str, module: str, text: str) -> str:
+    """Stable identity of a finding across scans (see finding_fingerprint):
+    the host it is about, the module, and what it says without the details
+    that change run to run (severity tag, LLM-directed marker, byte size)."""
+    return finding_fingerprint.fingerprint(host, module, text)
 
 
 _PATH_IN_TEXT_RE = re.compile(r"(/[\w\-./%]+)")
@@ -1278,10 +1315,9 @@ def _finding_host(module: str, text: str, scan_target: str | None, result: dict 
 
 async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
     """Upsert the scan's aggregated findings as persistent Finding rows and
-    auto-resolve whatever disappeared. Full scans upsert AND sweep; host and
-    module scans upsert only (they cover a single host / a module subset, so
-    sweeping on them would wrongly auto-fix findings they never checked);
-    discovery passes don't run the evaluation modules and are skipped entirely."""
+    auto-resolve whatever this scan re-checked and no longer sees — scoped to
+    the hosts it covered and the modules that ran (finding_scope). Discovery
+    passes don't run the evaluation modules and are skipped entirely."""
     kind = result.get("kind", "full")
     if kind not in ("full", "host", "module"):
         return
@@ -1301,7 +1337,8 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
         # that two different fanned-out hosts reporting the identical text
         # (e.g. both missing the same header) are tracked as separate findings
         # instead of collapsing into one row that only remembers the last host.
-        fp = _finding_fingerprint(host or dom.domain, module, text)
+        host = host or dom.domain          # the host anchors the finding: never NULL
+        fp = _finding_fingerprint(host, module, text)
         seen_fps.add(fp)
         risk = f.get("risk") if f.get("risk") in FINDING_RISK_LEVELS else "low"
         category = f.get("category") or _finding_category(module, f.get("finding"))
@@ -1331,14 +1368,18 @@ async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
             existing.fixed_at = None
             logger.info(f"[{scan_id}] Finding #{existing.id} reopened (reappeared in scan)")
         await existing.save()
-    # Sweep: open findings of this domain NOT seen in this scan are gone from
-    # the attack surface — auto-resolve them. Accepted findings keep their
-    # status (accepted is an operator decision, not a presence signal).
-    # Host/module scans never sweep: they only see part of the attack surface.
-    if kind != "full":
+    # Sweep: an open finding this scan was entitled to re-check and did not see
+    # is gone — auto-resolve it. "Entitled" is per host and per module (see
+    # finding_scope): a full scan no longer closes the findings of subdomains
+    # only their own host scans re-check, and a host/module scan now closes the
+    # ones it re-verified (otherwise a fix on a subdomain was only ever noticed
+    # by the wrong scan). Accepted findings keep their status (an operator
+    # decision, not a presence signal).
+    ran = finding_scope.modules_that_ran(result)
+    if not ran:
         return
-    stale = await Finding.filter(domain_id=dom.id, status="open") \
-        .exclude(last_seen_scan_id=scan_id)
+    candidates = await Finding.filter(domain_id=dom.id, status="open", module__in=sorted(ran))
+    stale = finding_scope.stale_findings(candidates, seen_fps, result, dom.domain)
     if stale:
         for rec in stale:
             rec.status = "fixed"
@@ -1822,6 +1863,13 @@ async def _persist_completed_scan(scan_id: str, domain: str, domain_id: int | No
         await _upsert_findings(dom, result, scan_id)
     except Exception:
         logger.exception(f"[{scan_id}] Findings upsert failed")
+    else:
+        _spawn(_triage_after_scan(dom.id))
+    try:
+        auto = bool((await _load_settings()).get("learned_auto_approve"))
+        await learned_paths.record_hits(result, smart_fuzz.known_wordlist_paths(), auto_approve=auto)
+    except Exception:
+        logger.exception(f"[{scan_id}] Recording learned paths failed")
 
     values = {
         "domain_id": dom.id,
@@ -1933,13 +1981,41 @@ async def _insert_queued_scan(scan_id: str, domain: str, domain_id: int | None) 
     )
 
 
+def _domains_in_flight() -> set[int]:
+    return {s.get("domain_id") for s in SCANS.values()
+            if s.get("status") in ("queued", "running") and s.get("domain_id") is not None}
+
+
+async def _merge_duplicate_domains() -> list[dict]:
+    """Fold company-less Domain rows into the company-owned row of the same
+    name (see domain_merge). Skips a pair while either row has a scan in
+    flight; the next pass picks it up."""
+    done: list[dict] = []
+    busy = _domains_in_flight()
+    for orphan, owned in await domain_merge.find_orphan_merges():
+        if orphan.id in busy or owned.id in busy:
+            logger.info(f"Domain merge {orphan.id}->{owned.id} ({owned.domain}) postponed: scan in flight")
+            continue
+        try:
+            stats = await domain_merge.merge_domain_into(orphan, owned)
+        except Exception:
+            logger.exception(f"Domain merge {orphan.id}->{owned.id} ({owned.domain}) failed")
+            continue
+        detail = {"merged_row": orphan.id, "into_row": owned.id, **stats}
+        await audit_log.record("domain.merge", None, target=f"domain:{owned.domain}", detail=detail)
+        done.append({"domain": owned.domain, **detail})
+    return done
+
+
 # ── Scheduler ──────────────────────────────────────────────────────────────────
-# Audit retention purge runs at most once every 24 h, on the scheduler tick.
+# Audit retention purge and the duplicate-domain merge run at most once every
+# 24 h, on the scheduler tick.
 _last_audit_purge: datetime | None = None
+_last_domain_merge: datetime | None = None
 
 
 async def _scheduler_loop() -> None:
-    global _last_audit_purge
+    global _last_audit_purge, _last_domain_merge
     while True:
         try:
             now = datetime.now(timezone.utc)
@@ -1947,6 +2023,9 @@ async def _scheduler_loop() -> None:
             if _last_audit_purge is None or now - _last_audit_purge >= timedelta(hours=24):
                 await audit_log.purge(settings["audit_retention_days"])
                 _last_audit_purge = now
+            if _last_domain_merge is None or now - _last_domain_merge >= timedelta(hours=24):
+                await _merge_duplicate_domains()
+                _last_domain_merge = now
             if settings.get("vuln_scan_enabled", True):
                 due = await Schedule.filter(enabled=True, next_run_at__lte=now).select_related("domain")
                 for sched in due:
@@ -2361,13 +2440,7 @@ async def start_host_scan(request: HostScanRequest, req: Request, user=Depends(r
     if request.modules and request.agent_mode:
         raise HTTPException(status_code=422, detail="agent_mode is not allowed for module scans")
     host = request.host
-    # The host must be the apex of a known Domain or an inventoried subdomain
-    # asset of one — resolve the parent domain row either way.
-    dom = await Domain.get_or_none(domain=host)
-    if dom is None:
-        asset = await Asset.filter(type="subdomain", value=host).first()
-        if asset is not None:
-            dom = await Domain.get_or_none(id=asset.domain_id)
+    dom = await _resolve_host_domain(host)
     if dom is None:
         raise HTTPException(status_code=404, detail="Unknown host: not an inventoried domain or subdomain")
     scan_id = _create_scan_entry(
@@ -2439,8 +2512,9 @@ async def get_agent_scan(agent_scan_id: str):
 def _strip_secret_values(node: Any) -> Any:
     """Copy `node` dropping the full secret `value` from every secret object
     (they always carry a redacted `snippet` alongside). Used to serve scan
-    results to viewers; the stored result keeps the value for operators/admins
-    and the PDF flow. Returns new structures — the input is never mutated."""
+    results — including PDF exports — to viewers; operators/admins and dev
+    mode keep the full values. Returns new structures — the input is never
+    mutated."""
     if isinstance(node, dict):
         return {
             k: _strip_secret_values(v)
@@ -2625,7 +2699,7 @@ async def delete_scan(scan_id: str, user=Depends(require_role("admin"))):
 
 
 @app.get("/api/scan/{scan_id}/report.pdf")
-async def download_pdf(scan_id: str):
+async def download_pdf(scan_id: str, req: Request):
     """Generate and return a PDF report for a completed scan."""
     result = None
     domain = None
@@ -2643,6 +2717,7 @@ async def download_pdf(scan_id: str):
             domain = row.domain.domain
     if result is None:
         raise HTTPException(status_code=409, detail="Scan not completed yet")
+    result = await _scan_result_for_role(result, req)
     try:
         report_data = result | {"scan_id": scan_id, "status": "completed"}
         pdf_bytes = pdf_report.generate_pdf(report_data)
@@ -2925,30 +3000,103 @@ async def create_domain(company_id: int, request: DomainCreateRequest,
     existing = await Domain.get_or_none(company_id=company.id, domain=request.domain)
     if existing is not None:
         raise HTTPException(status_code=409, detail="Domain already registered for this company")
-    dom = await Domain.create(company_id=company.id, domain=request.domain)
+    # Adopts an orphan row (a prior no-company quick scan) instead of creating
+    # a second Domain for the same string — two rows for "example.com" used to
+    # split its scan/asset history in two, with the orphan half invisible in
+    # every company view (Remediation, the report, the PDF) since they all
+    # query by company_id.
+    dom = await _get_or_create_domain(company.id, request.domain)
+    adopted = await Schedule.filter(domain_id=dom.id).exists()
 
     # New domains inherit the default recurrence from settings so the whole
-    # fleet is scheduled by default (editable per domain afterwards).
+    # fleet is scheduled by default (editable per domain afterwards). An
+    # adopted orphan keeps whatever schedule it already had, if any.
     settings = await _load_settings()
     interval = settings["default_interval_hours"]
     discover_on = settings["discovery_enabled"]
     discover_interval = settings["default_discover_interval_hours"]
     now = datetime.now(timezone.utc)
-    await Schedule.create(
-        domain_id=dom.id,
-        interval_hours=interval,
-        enabled=True,
-        agent_mode=settings["agent_mode_default"],
-        next_run_at=now + timedelta(hours=interval),
-        discover_enabled=discover_on,
-        discover_interval_hours=discover_interval if discover_on else None,
-        next_discover_at=now + timedelta(hours=discover_interval) if discover_on else None,
-    )
-    logger.info(f"Domain {dom.domain} added to company {company.id} with default schedule every {interval}h"
-                f" (agent_mode={settings['agent_mode_default']}, discovery={discover_on} every {discover_interval}h)")
+    if not adopted:
+        await Schedule.create(
+            domain_id=dom.id,
+            interval_hours=interval,
+            enabled=True,
+            agent_mode=settings["agent_mode_default"],
+            next_run_at=now + timedelta(hours=interval),
+            discover_enabled=discover_on,
+            discover_interval_hours=discover_interval if discover_on else None,
+            next_discover_at=now + timedelta(hours=discover_interval) if discover_on else None,
+        )
+    logger.info(f"Domain {dom.domain} added to company {company.id}"
+                + ("" if adopted else f" with default schedule every {interval}h"
+                   f" (agent_mode={settings['agent_mode_default']}, discovery={discover_on} every {discover_interval}h)"))
     await audit_log.record("domain.create", user, target=f"domain:{dom.domain}",
                            detail={"company": company.name})
     return {"id": dom.id, "company_id": company.id, "domain": dom.domain, "created_at": dom.created_at}
+
+
+def _serialize_learned(row: LearnedPath) -> dict:
+    return {
+        "id": row.id, "path": row.path, "status": row.status,
+        "hosts": len(row.hosts or []), "hits": row.hits, "last_status": row.last_status,
+        "ai_verdict": row.ai_verdict, "candidate": learned_paths.is_candidate(row),
+        "decided_by": row.decided_by,
+        "decided_at": row.decided_at.isoformat() if row.decided_at else None,
+    }
+
+
+@app.get("/api/learned-paths")
+async def list_learned_paths(user=Depends(require_role("admin"))):
+    """Paths the LLM found that no wordlist has: candidates awaiting a decision
+    (generic across hosts) plus what was approved or rejected."""
+    rows = await LearnedPath.all().order_by("-hits", "path")
+    return {
+        "candidates": [_serialize_learned(r) for r in rows if learned_paths.is_candidate(r)],
+        "approved": [_serialize_learned(r) for r in rows if r.status == "approved"],
+        "rejected": [_serialize_learned(r) for r in rows if r.status == "rejected"],
+        "seen": sum(1 for r in rows if r.status == "seen" and not learned_paths.is_candidate(r)),
+    }
+
+
+@app.post("/api/learned-paths/{path_id}/{action}")
+async def decide_learned_path(path_id: int, action: str, user=Depends(require_role("admin"))):
+    """approve = probe it in every scan from now on; reject = never offer it
+    again; reset = back to the queue. Approval is for all clients."""
+    status = {"approve": "approved", "reject": "rejected", "reset": "seen"}.get(action)
+    if status is None:
+        raise HTTPException(status_code=400, detail="action must be approve, reject or reset")
+    row = await LearnedPath.get_or_none(id=path_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Learned path not found")
+    if status == "approved" and not learned_paths.is_safe_path(row.path):
+        raise HTTPException(status_code=400, detail="This path is not safe to probe on every target")
+    who = user.get("email") if isinstance(user, dict) else getattr(user, "email", None)
+    await learned_paths.decide(row, status, who or "dev")
+    await audit_log.record("learned_path." + action, user, target=f"path:{row.path}",
+                           detail={"hosts": len(row.hosts or []), "hits": row.hits})
+    return _serialize_learned(row)
+
+
+@app.post("/api/domains/{source_id}/merge-into/{target_id}")
+async def merge_domains(source_id: int, target_id: int, user=Depends(require_role("admin"))):
+    """Fold a duplicate Domain row (source) into the one that stays (target):
+    scans, inventory and findings move over, conflicts keep the newest
+    observation (domain_merge). Only an orphan — or a row of the same company —
+    can be the source; a different company's domain is never taken away."""
+    source = await Domain.get_or_none(id=source_id)
+    target = await Domain.get_or_none(id=target_id)
+    if source is None or target is None:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    busy = _domains_in_flight()
+    if source.id in busy or target.id in busy:
+        raise HTTPException(status_code=409, detail="A scan is running for one of these domains — wait for it")
+    try:
+        stats = await domain_merge.merge_domain_into(source, target)
+    except domain_merge.MergeRefused as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await audit_log.record("domain.merge", user, target=f"domain:{target.domain}",
+                           detail={"merged_row": source_id, "into_row": target_id, **stats})
+    return {"merged": source_id, "into": target_id, "domain": target.domain, **stats}
 
 
 @app.delete("/api/domains/{domain_id}")
@@ -2978,27 +3126,68 @@ async def delete_company(company_id: int, user=Depends(require_role("admin"))):
     return {"message": "Deleted"}
 
 
-async def _build_company_findings(company: Company) -> dict:
+async def _build_company_findings(company: Company, host: str | None = None) -> dict:
+    """Latest-scan findings per domain. With `host`, only the findings about
+    that host (a subdomain's findings live in its parent domain's scan)."""
+    host = (host or "").strip().lower() or None
     domains = await Domain.filter(company_id=company.id).order_by("domain")
+    # Findings resolved or accepted in the remediation tracker are excluded so
+    # the report (and the PDF built from it) reflects the same open backlog as
+    # the remediation view instead of the raw scan snapshot.
+    closed_fps: dict[int, set[str]] = {}
+    async for rec in Finding.filter(domain_id__in=[d.id for d in domains],
+                                    status__in=["accepted", "fixed"]):
+        closed_fps.setdefault(rec.domain_id, set()).add(rec.fingerprint)
     out_domains: list[dict] = []
     for d in domains:
         latest = await Scan.filter(domain_id=d.id, status="completed",
                                    kind__in=["full", "discover"]).order_by("-completed_at", "-started_at").first()
-        if latest is None or not latest.result:
+        sources = [latest] if latest is not None and latest.result else []
+        if host:
+            # A host scan is where a subdomain gets its deepest evaluation; the
+            # domain-wide report never reads it, a per-host one must.
+            host_scan = await Scan.filter(domain_id=d.id, status="completed", kind="host",
+                                          scan_target=host).order_by("-completed_at", "-started_at").first()
+            if host_scan is not None and host_scan.result:
+                sources.append(host_scan)
+        if not sources:
             out_domains.append({"domain": d.domain, "scan_id": None, "grade": None, "score": None,
                                 "completed_at": None, "findings": []})
             continue
-        result = latest.result or {}
-        scorecard = latest.scorecard or {}
+        primary = max(sources, key=lambda sc: sc.completed_at or sc.started_at)
+        closed = closed_fps.get(d.id) or set()
+        findings = []
+        seen: set[str] = set()
+        for sc in sources:
+            result = sc.result or {}
+            scan_target = result.get("domain")
+            for f in result.get("findings") or []:
+                if isinstance(f, dict) and (closed or host):
+                    text = _finding_text(f.get("finding"))
+                    if text:
+                        module = f.get("module") or "unknown"
+                        f_host = _finding_host(module, text, scan_target, result) or d.domain
+                        if host and f_host.lower() != host:
+                            continue
+                        fp = _finding_fingerprint(f_host, module, text)
+                        if fp in closed or fp in seen:
+                            continue
+                        seen.add(fp)
+                    elif host:
+                        continue
+                findings.append(f)
+        scorecard = primary.scorecard or {}
         out_domains.append({
             "domain": d.domain,
-            "scan_id": latest.id,
+            "scan_id": primary.id,
             "grade": scorecard.get("grade"),
             "score": scorecard.get("score"),
             "overall_risk": scorecard.get("overall_risk"),
-            "completed_at": latest.completed_at,
-            "findings": result.get("findings") or [],
+            "completed_at": primary.completed_at,
+            "findings": findings,
         })
+    if host:
+        out_domains = [d for d in out_domains if d["findings"]]
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     # Category totals mirror the scoring model's classification (see
     # MODULE_FINDING_CATEGORY / _finding_category) — vulnerability/
@@ -3025,13 +3214,13 @@ async def _build_company_findings(company: Company) -> dict:
 
 
 @app.get("/api/companies/{company_id}/findings")
-async def company_findings(company_id: int):
+async def company_findings(company_id: int, host: str | None = None):
     """Consolidated findings per company: for each domain, the findings of its
     latest completed scan, with the scan_id so the UI can drill into the report."""
     company = await Company.get_or_none(id=company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
-    return await _build_company_findings(company)
+    return await _build_company_findings(company, host)
 
 
 # ── Remediation tracking & compliance mapping ─────────────────────────────────
@@ -3045,6 +3234,7 @@ def _serialize_finding(rec: Finding) -> dict:
         "text": rec.text,
         "host": rec.host,
         "evidence": rec.evidence,
+        "triage": rec.triage,
         "risk": rec.risk,
         "category": rec.category,
         "frameworks": rec.frameworks or [],
@@ -3066,14 +3256,110 @@ async def _company_findings_records(company_id: int) -> tuple[list[Domain], list
     return domains, records
 
 
+# ── AI triage of path findings (suggestions only — see modules/triage) ────────
+TRIAGE_STATE: dict[int, dict[str, Any]] = {}      # company_id -> running/pending/done
+_triage_lock = asyncio.Lock()
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _run_triage(findings: list[Finding], state: dict | None = None) -> dict[str, int]:
+    """Ask the LLM about the findings nobody has judged yet and store its
+    suggestion beside each one. Never touches status, risk or the score."""
+    todo = triage.candidates(findings)[: triage.MAX_PER_RUN]
+    stats = {"candidates": len(todo), "analyzed": 0, "suggested_dismissal": 0, "confirmed": 0}
+    if state is not None:
+        state.update(pending=len(todo), done=0)
+    for i in range(0, len(todo), triage.BATCH_SIZE):
+        chunk = todo[i:i + triage.BATCH_SIZE]
+        verdicts = await asyncio.to_thread(triage.classify, [item for _, item, _ in chunk])
+        for finding, _item, evidence_hash in chunk:
+            verdict = verdicts.get(finding.id)
+            if verdict is None:
+                continue
+            finding.triage = triage.stamp(verdict, evidence_hash)
+            await finding.save(update_fields=["triage"])
+            if (path := triage.path_of(finding.text)):
+                await learned_paths.set_verdict(path, verdict["verdict"])
+            stats["analyzed"] += 1
+            stats["suggested_dismissal" if verdict["verdict"] in triage.SUGGESTS_DISMISSAL else "confirmed"] += 1
+        if state is not None:
+            state["done"] += len(chunk)
+    return stats
+
+
+async def _triage_after_scan(domain_id: int) -> None:
+    """Post-scan hook (setting `triage_enabled`). Best-effort and serialized:
+    a failure here must never touch the scan that triggered it."""
+    try:
+        if not os.getenv("AI_API_KEY", "").strip():
+            return
+        if not (await _load_settings()).get("triage_enabled"):
+            return
+        async with _triage_lock:
+            findings = await Finding.filter(domain_id=domain_id, status="open",
+                                            module__in=list(triage.TRIAGE_MODULES))
+            stats = await _run_triage(findings)
+        if stats["analyzed"]:
+            await audit_log.record("triage.run", None, target=f"domain:{domain_id}",
+                                   detail={**stats, "trigger": "scan"})
+    except Exception:
+        logger.exception("Post-scan AI triage failed")
+
+
+async def _triage_company_job(company_id: int, findings: list[Finding], state: dict, user) -> None:
+    try:
+        async with _triage_lock:
+            stats = await _run_triage(findings, state)
+        await audit_log.record("triage.run", user, target=f"company:{company_id}",
+                               detail={**stats, "trigger": "manual"})
+    except Exception:
+        logger.exception(f"AI triage failed for company {company_id}")
+    finally:
+        state["running"] = False
+
+
+@app.post("/api/companies/{company_id}/triage")
+async def triage_company(company_id: int, user=Depends(require_role("operator", "admin"))):
+    """Run the AI triage over the company's open path findings in the
+    background; progress is reported by the remediations endpoint."""
+    if await Company.get_or_none(id=company_id) is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+    if not os.getenv("AI_API_KEY", "").strip():
+        raise HTTPException(status_code=409, detail="AI is not configured (AI_API_KEY)")
+    state = TRIAGE_STATE.get(company_id)
+    if state and state.get("running"):
+        return {"started": False, **state}
+    _, records = await _company_findings_records(company_id)
+    open_paths = [r for r in records if r.status == "open" and r.module in triage.TRIAGE_MODULES]
+    count = min(len(triage.candidates(open_paths)), triage.MAX_PER_RUN)
+    if count == 0:
+        return {"started": False, "running": False, "pending": 0, "done": 0}
+    state = {"running": True, "pending": count, "done": 0}
+    TRIAGE_STATE[company_id] = state
+    _spawn(_triage_company_job(company_id, open_paths, state, user))
+    return {"started": True, **state}
+
+
 @app.get("/api/companies/{company_id}/remediations")
-async def company_remediations(company_id: int):
+async def company_remediations(company_id: int, host: str | None = None):
     """Persistent findings grouped by domain with lifecycle status, plus
-    company-wide counts by status and by risk (open findings only)."""
+    counts by status and by risk (open findings only). With `host`, only the
+    findings about that host."""
     company = await Company.get_or_none(id=company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
     domains, records = await _company_findings_records(company_id)
+    host = (host or "").strip().lower() or None
+    if host:
+        names = {d.id: d.domain.lower() for d in domains}
+        records = [r for r in records if (r.host or names.get(r.domain_id, "")).lower() == host]
+        domains = [d for d in domains if any(r.domain_id == d.id for r in records)]
     risk_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     by_domain: dict[int, list[dict]] = {d.id: [] for d in domains}
     totals = {
@@ -3108,6 +3394,7 @@ async def company_remediations(company_id: int):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "totals": totals,
         "domains": out_domains,
+        "triage": TRIAGE_STATE.get(company_id),
     }
 
 
@@ -3299,9 +3586,10 @@ async def company_rating_history(company_id: int):
 @app.get("/api/dashboard/analytics")
 async def dashboard_analytics(company_id: int | None = Query(default=None), domain: str | None = Query(default=None)):
     """Aggregated chart data: findings by severity/category, per-company
-    severity breakdown, cumulative surface timeline (asset first_seen), rating
-    trend and remediation status. Scope: all companies, or one with
-    ?company_id=, or a single domain with ?domain= (within that scope)."""
+    severity breakdown, cumulative surface timeline (asset first_seen),
+    today's asset counts per company by type, rating trend and remediation
+    status. Scope: all companies, or one with ?company_id=, or a single
+    domain with ?domain= (within that scope)."""
     companies = await (Company.filter(id=company_id) if company_id else Company.all())
     comp_map = {c.id: c.name for c in companies}
     domains = await Domain.filter(company_id__in=list(comp_map)) if comp_map else []
@@ -3315,6 +3603,7 @@ async def dashboard_analytics(company_id: int | None = Query(default=None), doma
         "findings_by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
         "findings_by_category": {"vulnerability": 0, "misconfiguration": 0, "exposure": 0, "info": 0},
         "per_company": [], "surface_timeline": [], "rating_trend": [], "remediation": [],
+        "assets_per_company": [],
     }
     if not domain_ids:
         return empty
@@ -3356,14 +3645,19 @@ async def dashboard_analytics(company_id: int | None = Query(default=None), doma
                 "score": sc.get("score"),
             })
 
-    # Cumulative surface timeline from asset first_seen dates
+    # Cumulative surface timeline from asset first_seen dates, and today's
+    # asset counts per company by type — same pass over the same rows.
     surface: dict[str, dict[str, Any]] = {}
+    assets_per_company: dict[int, dict] = {}
     async for a in Asset.filter(domain_id__in=domain_ids):
         day = a.first_seen_at.date().isoformat() if a.first_seen_at else None
-        if not day:
-            continue
-        bucket = surface.setdefault(day, {"date": day})
-        bucket[a.type] = bucket.get(a.type, 0) + 1
+        if day:
+            bucket = surface.setdefault(day, {"date": day})
+            bucket[a.type] = bucket.get(a.type, 0) + 1
+        cid = dom_to_company.get(a.domain_id)
+        if cid is not None:
+            pac = assets_per_company.setdefault(cid, {"company": comp_map.get(cid, "?")})
+            pac[a.type] = pac.get(a.type, 0) + 1
     surface_timeline: list[dict] = []
     cumulative: dict[str, int] = {}
     for day in sorted(surface):
@@ -3394,20 +3688,25 @@ async def dashboard_analytics(company_id: int | None = Query(default=None), doma
         "surface_timeline": surface_timeline,
         "rating_trend": rating_trend,
         "remediation": sorted(remediation_map.values(), key=lambda r: r["company"]),
+        "assets_per_company": sorted(assets_per_company.values(), key=lambda p: p["company"]),
     }
 
 
 @app.get("/api/companies/{company_id}/report.pdf")
-async def company_report_pdf(company_id: int):
+async def company_report_pdf(company_id: int, host: str | None = None):
     """Consolidated PDF report for a company: cover with totals, one section per
     domain (latest completed scan) and an aggregated asset-inventory summary."""
     company = await Company.get_or_none(id=company_id)
     if company is None:
         raise HTTPException(status_code=404, detail="Company not found")
-    findings_payload = await _build_company_findings(company)
+    findings_payload = await _build_company_findings(company, host)
     scanned = [d for d in findings_payload["domains"] if d.get("scan_id")]
     if not scanned:
-        raise HTTPException(status_code=409, detail="No completed scans in any domain of this company")
+        raise HTTPException(
+            status_code=409,
+            detail=(f"No findings for host {host} in the latest scans" if host
+                    else "No completed scans in any domain of this company"),
+        )
     try:
         assets_payload = await _build_company_assets(company)
         assets_summary = assets_payload.get("summary")
@@ -3418,9 +3717,10 @@ async def company_report_pdf(company_id: int):
         assets_detail = None
     try:
         pdf_bytes = pdf_report.generate_company_pdf(
-            company.name, findings_payload["domains"], assets_summary, assets_detail,
+            f"{company.name} — {host}" if host else company.name,
+            findings_payload["domains"], assets_summary, assets_detail,
         )
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", company.name).strip("_") or "company"
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f"{company.name}_{host}" if host else company.name).strip("_") or "company"
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
@@ -4589,6 +4889,8 @@ class SettingsUpdateRequest(BaseModel):
     constellation_enabled: bool | None = None
     user_agent: str | None = None
     audit_retention_days: int | None = None
+    triage_enabled: bool | None = None
+    learned_auto_approve: bool | None = None
     tools_subfinder: bool | None = None
     tools_httpx: bool | None = None
     tools_katana: bool | None = None
@@ -4696,6 +4998,8 @@ async def update_settings(request: SettingsUpdateRequest, user=Depends(require_r
         "constellation_enabled": request.constellation_enabled,
         "user_agent": request.user_agent,
         "audit_retention_days": request.audit_retention_days,
+        "triage_enabled": request.triage_enabled,
+        "learned_auto_approve": request.learned_auto_approve,
         "tools_subfinder": request.tools_subfinder,
         "tools_httpx": request.tools_httpx,
         "tools_katana": request.tools_katana,

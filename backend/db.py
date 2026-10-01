@@ -150,6 +150,10 @@ class Finding(Model):
     # response snippet) — the persisted `text` above is a one-line summary and
     # was otherwise the only thing Remediation could ever show for a finding.
     evidence = fields.JSONField(null=True)
+    # AI triage suggestion: {"verdict": confirmed|public_by_design|noise,
+    # "reason": str, "model": str, "at": iso, "hash": str}. A suggestion only —
+    # it never changes status or the score; a human accepts or ignores it.
+    triage = fields.JSONField(null=True)
     risk = fields.CharField(max_length=16)  # critical|high|medium|low|info
     category = fields.CharField(max_length=32, default="info")  # vulnerability|misconfiguration|exposure|info
     frameworks = fields.JSONField(default=list)  # e.g. ["NIST-CSF", "ISO-27001"]
@@ -199,6 +203,27 @@ class AuditEvent(Model):
 
     class Meta:
         table = "audit_events"
+
+
+class LearnedPath(Model):
+    """A path the LLM proposed to smart_fuzz and a real request confirmed, that
+    no static wordlist has. Kept in the database, never in the repository's
+    wordlists: it is learned from client sites. A candidate becomes part of
+    every scan only once approved (or automatically, if the setting is on)."""
+    id = fields.IntField(pk=True)
+    path = fields.CharField(max_length=200, unique=True)
+    status = fields.CharField(max_length=16, default="seen")  # seen|approved|rejected
+    hosts = fields.JSONField(default=list)       # distinct hosts it answered on (capped)
+    hits = fields.IntField(default=0)
+    last_status = fields.IntField(null=True)
+    ai_verdict = fields.CharField(max_length=24, null=True)   # latest triage verdict
+    first_seen_at = fields.DatetimeField(auto_now_add=True)
+    last_seen_at = fields.DatetimeField(null=True)
+    decided_by = fields.CharField(max_length=255, null=True)  # user email, or "auto"
+    decided_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        table = "learned_paths"
 
 
 class User(Model):

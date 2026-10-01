@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
 import { AppSettings } from '../types/report'
 import { SectionCard } from './ui'
+import LearnedPathsPanel from './LearnedPathsPanel'
 import {
   BadgeCheck,
   Bell,
@@ -228,6 +229,8 @@ export default function SettingsView() {
     chain_eval_fuzz?: boolean
     chain_eval_scope?: 'new' | 'all'
     ai_domain_suggestions?: boolean
+    triage_enabled?: boolean
+    learned_auto_approve?: boolean
     constellation_enabled?: boolean
   }) => {
     if (!settings) return
@@ -500,6 +503,36 @@ export default function SettingsView() {
                   <p className="text-xs text-dark-500 leading-relaxed">{t('settings.aiDomainSuggDesc')}</p>
                 </div>
               </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Switch
+                  checked={settings.triage_enabled ?? false}
+                  onChange={(next) => saveChainEval({ triage_enabled: next })}
+                />
+                <div>
+                  <span className="text-sm text-dark-200">{t('settings.triageToggle')}</span>
+                  <p className="text-xs text-dark-500 leading-relaxed">
+                    {t('settings.triageDesc')}
+                    {!settings.ai?.configured && <span className="text-amber-600"> {t('settings.triageNeedsAi')}</span>}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </SectionCard>
+
+          {/* Paths the LLM found that no wordlist has, awaiting approval */}
+          <SectionCard title={t('settings.learned.title')} icon={<Sparkles />}>
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <Switch
+                  checked={settings.learned_auto_approve ?? false}
+                  onChange={(next) => saveChainEval({ learned_auto_approve: next })}
+                />
+                <div>
+                  <span className="text-sm text-dark-200">{t('settings.learned.autoToggle')}</span>
+                  <p className="text-xs text-dark-500 leading-relaxed">{t('settings.learned.autoDesc')}</p>
+                </div>
+              </div>
+              <LearnedPathsPanel />
             </div>
           </SectionCard>
 

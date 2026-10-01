@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import {
   ArrowLeft,
   Bot,
@@ -12,10 +13,20 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Sparkles,
   Undo2,
 } from 'lucide-react'
 import { Company } from '../types/report'
 import { LinkifyText, PAGE_SIZE, Pager, RiskBadge } from './ui'
+
+/** AI triage suggestion stored beside a finding. Only a suggestion: it never
+ * changes the status or the score; a person accepts it or ignores it. */
+export interface Triage {
+  verdict: 'confirmed' | 'public_by_design' | 'noise'
+  reason: string
+  model?: string
+  at?: string
+}
 
 export interface RemediationFinding {
   id: number
@@ -29,6 +40,7 @@ export interface RemediationFinding {
    * source, an HTTP status/size, a response snippet) — plain key/value,
    * shown in the expanded row when the one-line text isn't enough. */
   evidence: Record<string, string | number | string[]> | null
+  triage?: Triage | null
   risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category: string
   frameworks: string[]
@@ -59,7 +71,11 @@ interface RemediationsResponse {
     auto_fixed_week: number
   }
   domains: RemediationDomain[]
+  triage?: { running: boolean; pending: number; done: number } | null
 }
+
+const suggestsDismissal = (r: { status: string; triage?: Triage | null }) =>
+  r.status === 'open' && !!r.triage && (r.triage.verdict === 'public_by_design' || r.triage.verdict === 'noise')
 
 interface Props {
   company: Company
@@ -214,21 +230,25 @@ const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(
 
 export default function RemediationView({ company, readOnly = false, onBack }: Props) {
   const { t } = useTranslation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const hostFilter = searchParams.get('host') ?? ''
   const [data, setData] = useState<RemediationsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [leakcheckAvailable, setLeakcheckAvailable] = useState(false)
+  const [aiConfigured, setAiConfigured] = useState(false)
+  const [suggestedOnly, setSuggestedOnly] = useState(false)
   const [filter, setFilter] = useState<StatusFilter>('open')
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
   const [page, setPage] = useState(1)
   const [expanded, setExpanded] = useState<number | null>(null)
   const [busy, setBusy] = useState<number | null>(null)
 
-  const load = async () => {
-    setLoading(true)
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
     setError('')
     try {
-      const { data } = await axios.get<RemediationsResponse>(`/api/companies/${company.id}/remediations`)
+      const { data } = await axios.get<RemediationsResponse>(`/api/companies/${company.id}/remediations`, { params: hostFilter ? { host: hostFilter } : {} })
       setData(data)
     } catch (err) {
       setError(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : t('remediation.loadError'))
@@ -236,21 +256,57 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [company.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load() }, [company.id, hostFilter]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    axios.get<{ leakcheck?: { configured: boolean } }>('/api/settings')
-      .then(({ data }) => setLeakcheckAvailable(data.leakcheck?.configured === true))
-      .catch(() => setLeakcheckAvailable(false))
+    axios.get<{ leakcheck?: { configured: boolean }; ai?: { configured: boolean } }>('/api/settings')
+      .then(({ data }) => {
+        setLeakcheckAvailable(data.leakcheck?.configured === true)
+        setAiConfigured(data.ai?.configured === true)
+      })
+      .catch(() => { setLeakcheckAvailable(false); setAiConfigured(false) })
   }, [])
+
+  // While the AI triage runs in the background, follow its progress.
+  const triageRunning = data?.triage?.running === true
+  useEffect(() => {
+    if (!triageRunning) return
+    const timer = setInterval(() => { load(true) }, 3000)
+    return () => clearInterval(timer)
+  }, [triageRunning, company.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const startTriage = async () => {
+    try {
+      await axios.post(`/api/companies/${company.id}/triage`)
+      await load(true)
+    } catch (err) {
+      alert(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : t('remediation.triage.error'))
+    }
+  }
 
   const rows = useMemo<Row[]>(() => {
     if (!data) return []
     return data.domains.flatMap((d) => d.findings.map((f) => ({ ...f, domain: d.domain })))
   }, [data])
 
+  const suggestedRows = rows.filter(suggestsDismissal)
   const filtered = rows.filter((r) => (filter === 'all' || r.status === filter)
-    && (categoryFilter === 'all' || r.category === categoryFilter))
+    && (categoryFilter === 'all' || r.category === categoryFilter)
+    && (!suggestedOnly || suggestsDismissal(r)))
+
+  // Accepts every AI-suggested dismissal at once, keeping the AI's reason as
+  // the note so the decision stays explainable.
+  const acceptSuggested = async () => {
+    if (!suggestedRows.length || !window.confirm(t('remediation.triage.confirmAcceptAll', { count: suggestedRows.length }))) return
+    setBusy(-1)
+    const results = await Promise.allSettled(suggestedRows.map((r) =>
+      axios.put(`/api/findings/${r.id}/status`, { status: 'accepted', notes: `IA: ${r.triage?.reason ?? ''}`.trim() })))
+    const failed = results.filter((x) => x.status === 'rejected').length
+    if (failed) alert(t('remediation.triage.acceptAllPartial', { failed }))
+    setSuggestedOnly(false)
+    await load(true)
+    setBusy(null)
+  }
   const categoryCounts = rows.reduce<Record<string, number>>((acc, r) => {
     if (filter === 'all' || r.status === filter) acc[r.category] = (acc[r.category] ?? 0) + 1
     return acc
@@ -267,7 +323,9 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     if (!window.confirm(confirmMsg)) return
     setBusy(row.id)
     try {
-      const { data: updated } = await axios.put<RemediationFinding>(`/api/findings/${row.id}/status`, { status })
+      const note = status === 'accepted' && suggestsDismissal(row) ? `IA: ${row.triage?.reason ?? ''}`.trim() : undefined
+      const { data: updated } = await axios.put<RemediationFinding>(
+        `/api/findings/${row.id}/status`, { status, ...(note ? { notes: note } : {}) })
       setData((prev) => {
         if (!prev) return prev
         const before = prev.domains.flatMap((d) => d.findings).find((f) => f.id === row.id)
@@ -320,6 +378,15 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
             <ClipboardCheck className="w-5 h-5 text-cyber-600" />
             {t('remediation.title', { name: company.name })}
           </h2>
+          {hostFilter && (
+            <button
+              onClick={() => setSearchParams({})}
+              title={t('remediation.hostFilterClear')}
+              className="mt-1 inline-flex items-center gap-1 rounded-full border border-cyber-300 bg-cyber-50 px-2 py-0.5 font-mono text-xs text-cyber-700 hover:bg-cyber-100"
+            >
+              {t('remediation.hostFilter', { host: hostFilter })} ✕
+            </button>
+          )}
           {data && (
             <div className="text-xs text-dark-500">
               {t('remediation.counts', {
@@ -340,7 +407,20 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
             ))}
           </div>
         )}
-        <button onClick={load} disabled={loading} className="btn-secondary disabled:cursor-wait">
+        {!readOnly && aiConfigured && (
+          <button
+            onClick={startTriage}
+            disabled={triageRunning}
+            title={t('remediation.triage.buttonTitle')}
+            className="btn-secondary disabled:cursor-wait"
+          >
+            <Sparkles className={clsx('w-3.5 h-3.5', triageRunning && 'animate-pulse')} />
+            {triageRunning
+              ? t('remediation.triage.running', { done: data?.triage?.done ?? 0, total: data?.triage?.pending ?? 0 })
+              : t('remediation.triage.button')}
+          </button>
+        )}
+        <button onClick={() => load()} disabled={loading} className="btn-secondary disabled:cursor-wait">
           <RefreshCw className={clsx('w-3.5 h-3.5', loading && 'animate-spin')} />
           {t('dashboard.refresh')}
         </button>
@@ -391,6 +471,33 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
             </button>
           ))}
         </div>
+        {suggestedRows.length > 0 && (
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => { setSuggestedOnly((v) => !v); setPage(1); setFilter('open') }}
+              title={t('remediation.triage.chipTitle')}
+              className={clsx(
+                'inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border rounded-lg transition-colors duration-150',
+                suggestedOnly
+                  ? 'bg-fuchsia-50 border-fuchsia-400 text-fuchsia-700 font-medium'
+                  : 'bg-white hover:bg-dark-900 border-dark-700 text-dark-200',
+              )}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              {t('remediation.triage.chip')}
+              <span className="font-mono text-[10px] text-dark-500">{suggestedRows.length}</span>
+            </button>
+            {!readOnly && suggestedOnly && (
+              <button
+                onClick={acceptSuggested}
+                disabled={busy === -1}
+                className="text-xs px-3 py-1.5 border rounded-lg border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+              >
+                {t('remediation.triage.acceptAll', { count: suggestedRows.length })}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {loading && !data && (
@@ -450,6 +557,14 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                         <span className="line-clamp-2">
                           <LinkifyText text={agentTag.text} baseUrl={`https://${row.host ?? row.domain}`} />
                         </span>
+                        {suggestsDismissal(row) && (
+                          <span
+                            title={row.triage?.reason}
+                            className="mt-1 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full border bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200 whitespace-nowrap"
+                          >
+                            <Sparkles className="w-3 h-3" /> {t(`remediation.triage.verdict.${row.triage?.verdict}`)}
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-2">
                         <div className="flex flex-wrap items-center gap-1">
@@ -538,6 +653,14 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                               <p className="text-dark-500">
                                 {t('remediation.col.host')}: <span className="font-mono text-dark-300">{row.host}</span>
                                 {row.host !== row.domain && <span> ({t('remediation.hostVsDomain', { domain: row.domain })})</span>}
+                              </p>
+                            )}
+                            {row.triage && (
+                              <p className="inline-flex flex-wrap items-center gap-1.5 text-[11px] text-fuchsia-700">
+                                <Sparkles className="w-3.5 h-3.5" />
+                                <span className="font-semibold">{t(`remediation.triage.verdict.${row.triage.verdict}`)}</span>
+                                {row.triage.reason && <span className="text-dark-500">— {row.triage.reason}</span>}
+                                <span className="text-dark-600">({t('remediation.triage.suggestionOnly')})</span>
                               </p>
                             )}
                             {row.module === 'breach' && <LeakcheckLookup available={leakcheckAvailable} />}

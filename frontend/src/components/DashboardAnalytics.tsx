@@ -42,6 +42,9 @@ const SURFACE_COLORS: Record<string, string> = {
   endpoint: '#059669',
   app: '#db2777',
   neighbor: '#64748b',
+  technology: '#2563eb',
+  admin_panel: '#dc2626',
+  exposed_file: '#ea580c',
 }
 const COMPANY_COLORS = ['#7c3aed', '#0891b2', '#059669', '#d97706', '#db2777', '#64748b', '#dc2626', '#2563eb']
 
@@ -53,6 +56,7 @@ interface Analytics {
   surface_timeline: Record<string, unknown>[]
   rating_trend: { date: string; company: string; score: number }[]
   remediation: { company: string; open: number; accepted: number; fixed: number }[]
+  assets_per_company: Record<string, string | number>[]
 }
 
 const chartText = { fontSize: 11, fill: '#64748b' }
@@ -81,6 +85,15 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
   const surfaceKeys = Array.from(new Set(
     data.surface_timeline.flatMap((row) => Object.keys(row).filter((k) => k !== 'date')),
   ))
+  const assetTypeKeys = Array.from(new Set(
+    data.assets_per_company.flatMap((row) => Object.keys(row).filter((k) => k !== 'company')),
+  ))
+  const ASSET_TYPE_CATEGORY: Record<string, string> = {
+    subdomain: 'subdomains', ip: 'ips', port: 'ports', endpoint: 'endpoints',
+    app: 'apps', neighbor: 'neighbors', technology: 'technologies',
+    admin_panel: 'admin_panels', exposed_file: 'exposed_files',
+  }
+  const assetLabel = (key: string) => t(`dashboard.categories.${ASSET_TYPE_CATEGORY[key] ?? key}`, { defaultValue: key })
   const ratingCompanies = Array.from(new Set(data.rating_trend.map((p) => p.company)))
   // Pivot rating trend: one row per date, one key per company
   const ratingByDate = new Map<string, Record<string, unknown>>()
@@ -95,7 +108,8 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
   const hasSurface = data.surface_timeline.length > 0
   const hasRatings = ratingRows.length > 1
   const hasRemediation = data.remediation.length > 0
-  if (!hasFindings && !hasSurface && !hasRatings && !hasRemediation) return null
+  const hasAssetsPerCompany = data.assets_per_company.length > 1
+  if (!hasFindings && !hasSurface && !hasRatings && !hasRemediation && !hasAssetsPerCompany) return null
 
   return (
     <SectionCard title={t('analytics.title')} icon={<BarChart3 />}>
@@ -189,6 +203,25 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
                     strokeWidth={2} dot={false} connectNulls />
                 ))}
               </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        {hasAssetsPerCompany && (
+          <div className="border border-dark-800 rounded-xl p-3">
+            <h4 className="text-xs font-semibold text-dark-500 uppercase tracking-wider mb-2">{t('analytics.assetsPerCompany')}</h4>
+            <ResponsiveContainer width="100%" height={Math.max(160, data.assets_per_company.length * 32)}>
+              <BarChart data={data.assets_per_company} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis type="number" allowDecimals={false} tick={chartText} />
+                <YAxis type="category" dataKey="company" width={110} tick={chartText} />
+                <Tooltip />
+                <Legend formatter={(v) => <span style={chartText}>{assetLabel(v)}</span>} />
+                {assetTypeKeys.map((k, i) => (
+                  <Bar key={k} dataKey={k} stackId="a" name={k} fill={SURFACE_COLORS[k] ?? COMPANY_COLORS[i % COMPANY_COLORS.length]}
+                    radius={i === assetTypeKeys.length - 1 ? [0, 4, 4, 0] : undefined} />
+                ))}
+              </BarChart>
             </ResponsiveContainer>
           </div>
         )}

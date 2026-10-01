@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
+import { useSearchParams } from 'react-router-dom'
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   ArrowLeft,
@@ -174,6 +175,8 @@ const ASSET_CARDS: { key: keyof AssetSummary; labelKey: string; icon: LucideIcon
 
 export default function CompanyReportView({ company, onBack, onOpenReport }: Props) {
   const { t } = useTranslation()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const hostFilter = searchParams.get('host') ?? ''
   const [data, setData] = useState<CompanyFindingsResponse | null>(null)
   const [assets, setAssets] = useState<AssetSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -183,7 +186,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
   const handleDownloadPdf = async () => {
     setDownloadingPdf(true)
     try {
-      const res = await fetch(`/api/companies/${company.id}/report.pdf`, {
+      const res = await fetch(`/api/companies/${company.id}/report.pdf${hostFilter ? `?host=${encodeURIComponent(hostFilter)}` : ''}`, {
         headers: { Authorization: `Bearer ${getToken() ?? ''}` },
       })
       if (!res.ok) {
@@ -195,7 +198,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `sauron_${company.name.replace(/[^a-z0-9]+/gi, '_')}.pdf`
+      a.download = `sauron_${(hostFilter ? `${company.name}_${hostFilter}` : company.name).replace(/[^a-z0-9.]+/gi, '_')}.pdf`
       a.click()
       URL.revokeObjectURL(url)
     } catch (e) {
@@ -209,7 +212,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
     setLoading(true)
     setError('')
     const [findingsRes, assetsRes] = await Promise.allSettled([
-      axios.get<CompanyFindingsResponse>(`/api/companies/${company.id}/findings`),
+      axios.get<CompanyFindingsResponse>(`/api/companies/${company.id}/findings`, { params: hostFilter ? { host: hostFilter } : {} }),
       axios.get<{ summary: AssetSummary }>(`/api/companies/${company.id}/assets`),
     ])
     if (findingsRes.status === 'fulfilled') {
@@ -224,7 +227,7 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [company.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load() }, [company.id, hostFilter]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const scanned = data?.domains.filter((d) => d.scan_id) ?? []
   const scores = scanned.map((d) => d.score).filter((s): s is number => s != null)
@@ -239,6 +242,15 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
         </button>
         <div className="flex-1 min-w-[200px]">
           <h2 className="text-xl font-semibold tracking-tight text-dark-100">{t('companyReport.reportTitle', { name: company.name })}</h2>
+          {hostFilter && (
+            <button
+              onClick={() => setSearchParams({})}
+              title={t('remediation.hostFilterClear')}
+              className="mt-1 inline-flex items-center gap-1 rounded-full border border-cyber-300 bg-cyber-50 px-2 py-0.5 font-mono text-xs text-cyber-700 hover:bg-cyber-100"
+            >
+              {t('remediation.hostFilter', { host: hostFilter })} ✕
+            </button>
+          )}
           {data && (
             <div className="text-xs text-dark-500">
               {t('companyReport.latestPerDomain')} · {t('companyReport.generated', { date: new Date(data.generated_at).toLocaleString() })}

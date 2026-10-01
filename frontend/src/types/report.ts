@@ -965,6 +965,8 @@ export interface AppSettings {
   fanout_scope?: 'new' | 'changed' | 'new_or_changed' | 'all_alive'
   ai_domain_suggestions?: boolean
   constellation_enabled?: boolean
+  triage_enabled?: boolean
+  learned_auto_approve?: boolean
   user_agent?: string
   user_agent_default?: string
   agent_mode_default?: boolean

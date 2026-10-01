@@ -8,8 +8,13 @@ Replaces ad-hoc wordlist probing with a single engine that:
      seguros.txt when the brand looks like a LATAM insurer.
   2. Optionally asks the LLM for directed paths (`_llm_directed_paths`):
      prefixes derived from JS-mined endpoints, per-stack checks, per-sector
-     guesses. Directed paths are probed FIRST, flagged "directed": true and
-     bumped one severity notch on match.
+     guesses. Directed paths are probed FIRST and flagged "directed": true.
+     The flag does not change severity: who proposed a path says nothing about
+     how serious what answered it is (it used to add a notch, which rated
+     public WordPress listings HIGH).
+  2b. Paths an administrator approved from the learned-paths queue (hits the
+     LLM found that proved generic across hosts) are probed right after the
+     directed ones, before the static wordlists.
   3. Applies the same anti-false-positive calibration as exposed_files by
      IMPORTING its helpers (baseline with random-404 hashes, homepage
      catch-all ±5%, median-200, magic bytes, content signatures, WAF block
@@ -23,6 +28,7 @@ Contract: run(domain, ...) -> dict with keys
   status, wordlist_used, requests_made, paths_found, waf_blocked, risk, findings.
 """
 import asyncio
+import functools
 import logging
 import os
 import re
@@ -96,6 +102,19 @@ def _load_wordlist(name: str) -> list[str]:
         if entry and not entry.startswith("#"):
             out.append(entry)
     return out
+
+
+@functools.lru_cache(maxsize=1)
+def known_wordlist_paths() -> frozenset[str]:
+    """Every path any static wordlist would probe (lowercase, no trailing
+    slash) — what a "learned" path must not duplicate."""
+    out: set[str] = set()
+    for f in sorted(_WORDLIST_DIR.glob("*.txt")):
+        for entry in _load_wordlist(f.name):
+            norm = _normalize_entry(entry)
+            if norm:
+                out.add(norm.lower().rstrip("/") or "/")
+    return frozenset(out)
 
 
 def _normalize_entry(entry: str) -> str | None:
@@ -173,12 +192,6 @@ def _base_severity(path: str) -> str:
         if pattern.search(path):
             return sev
     return "low"
-
-
-def _bump(severity: str) -> str:
-    order = ["info", "low", "medium", "high", "critical"]
-    idx = order.index(severity) if severity in order else 1
-    return order[min(len(order) - 1, idx + 1)]
 
 
 # ── LLM-directed paths ────────────────────────────────────────────────────────
@@ -373,10 +386,6 @@ async def _probe_path(
 
 
 def _make_hit(path, url, status, size, severity, directed, evidence) -> dict:
-    # Redirects and 401/403 stay "low" even when LLM-directed: a bump would surface
-    # them as MEDIUM findings although nothing proves the path is exposed.
-    if directed and status not in (301, 302, 303, 307, 308, 401, 403):
-        severity = _bump(severity)
     return {
         "path": path,
         "url": url,
@@ -517,6 +526,7 @@ def run(
     company_context: str | None = None,
     min_delay: float = 0.0,
     enable_llm: bool = True,
+    extra_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Probe `domain` for hidden paths.
 
@@ -539,6 +549,9 @@ def run(
     llm_paths = llm_paths or []
 
     wl_paths, wl_names = _select_wordlists(domain, wordlist, tech_hints, known_endpoints)
+    if extra_paths:
+        wl_paths = list(extra_paths) + wl_paths
+        wl_names = [*wl_names, "learned"]
 
     # Directed paths first, then the wordlists; dedupe preserving priority.
     probes: list[tuple[str, bool]] = []

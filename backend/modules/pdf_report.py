@@ -2174,7 +2174,7 @@ def _fmt_scan_date(value: Any) -> str:
 
 
 def _severity_counts(findings: list[dict]) -> dict[str, int]:
-    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for f in findings:
         r = (f.get("risk") or "low").lower()
         if r in counts:
@@ -2251,6 +2251,7 @@ def _build_company_cover(
         ["Total Findings", str(total_findings)],
         ["Critical / High", f"{totals['critical']} / {totals['high']}"],
         ["Medium / Low", f"{totals['medium']} / {totals['low']}"],
+        ["Info", str(totals.get("info", 0))],
     ]
     data = [[
         Paragraph(_e(k), ParagraphStyle("mk", fontName="Helvetica-Bold", fontSize=8,
@@ -2371,14 +2372,14 @@ def _build_company_domain_section(d: dict, styles: dict) -> list:
 
     # Severity badges row
     badge_cells = []
-    for sev in ("critical", "high", "medium", "low"):
+    for sev in ("critical", "high", "medium", "low", "info"):
         badge_cells.append([
             RiskBadge(sev),
             Paragraph(f"<b>{counts[sev]}</b>", ParagraphStyle(
                 "sc", fontName="Helvetica-Bold", fontSize=10,
                 textColor=C_TEXT, alignment=TA_CENTER)),
         ])
-    bt = Table([badge_cells], colWidths=[COL_W / 4] * 4)
+    bt = Table([badge_cells], colWidths=[COL_W / 5] * 5)
     bt.setStyle(TableStyle([
         ("GRID",         (0, 0), (-1, -1), 0.3, C_BORDER),
         ("ALIGN",        (0, 0), (-1, -1), "CENTER"),
@@ -2616,7 +2617,7 @@ def generate_company_pdf(
     buf = io.BytesIO()
     styles = _build_styles()
 
-    totals = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+    totals = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for d in domains_data:
         for k, v in _severity_counts(d.get("findings") or []).items():
             totals[k] += v

@@ -104,6 +104,12 @@ export default function AssetDetailView({ company, hostValue, readOnly = false, 
             )}
           </div>
         )}
+        <Link to={`/companies/${company.id}/remediations?host=${encodeURIComponent(hostValue)}`} className="btn-secondary">
+          {t('hosts.detail.findingsBtn')}
+        </Link>
+        <Link to={`/companies/${company.id}/report?host=${encodeURIComponent(hostValue)}`} className="btn-secondary">
+          {t('hosts.detail.reportBtn')}
+        </Link>
         {!readOnly && (
           <button
             onClick={scanHost}

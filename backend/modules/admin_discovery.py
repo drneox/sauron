@@ -87,6 +87,40 @@ def _body_hash(content: bytes) -> str:
     return hashlib.md5(content).hexdigest()
 
 
+def _unreflect(body: bytes, path: str) -> bytes:
+    """Body with the probed path blanked out. SPA servers (Next.js, Nuxt, ...)
+    answer every unknown URL with the same shell and echo the URL into it
+    (page props, <link rel=canonical>...), so two probes differ by a few bytes
+    and a plain hash never matches the soft-404 baseline."""
+    for form in {path, path.replace("/", "\\/"), path.replace("/", "%2F"), path.replace("/", "%2f")}:
+        body = body.replace(form.encode(), b"\0")
+    return body
+
+
+def _near(a: int, b: int, tolerance: float = 0.03) -> bool:
+    """Sizes within a few percent (plus a small absolute slack for tiny bodies)."""
+    return abs(a - b) <= max(64, int(max(a, b) * tolerance))
+
+
+# A catch-all answers many different paths with the same page; this many
+# near-identical 200s means they are the app shell, not that many panels.
+CATCH_ALL_CLUSTER = 3
+
+
+def drop_catch_all(found: list[dict]) -> tuple[list[dict], int]:
+    """Remove 200 hits that form a cluster of near-identical sizes. Returns
+    (kept, dropped_count). A real panel differs from its siblings, so it
+    survives; the shell returned for every path does not."""
+    ok = [f for f in found if f.get("status") == 200]
+    doomed: set[int] = set()
+    for f in ok:
+        group = [g for g in ok if _near(f["size"], g["size"])]
+        if len(group) >= CATCH_ALL_CLUSTER:
+            doomed.update(id(g) for g in group)
+    kept = [f for f in found if id(f) not in doomed]
+    return kept, len(found) - len(kept)
+
+
 def _has_login_signal(body: bytes) -> bool:
     body_lower = body.lower()
     return any(sig.lower() in body_lower for sig in _LOGIN_SIGNALS)
@@ -106,6 +140,7 @@ def _redirect_looks_real(location: str, base_url: str) -> bool:
 async def _calibrate(client: httpx.AsyncClient, base_url: str) -> dict:
     homepage_hash   = None
     soft404_hashes: set[str] = set()
+    soft404_sizes: list[int] = []
 
     try:
         r = await afetch(base_url + "/", client=client, timeout=6)
@@ -117,10 +152,14 @@ async def _calibrate(client: httpx.AsyncClient, base_url: str) -> dict:
         try:
             r = await afetch(base_url + path, client=client, allow_redirects=False, timeout=5)
             soft404_hashes.add(_body_hash(r.content))
+            soft404_hashes.add(_body_hash(_unreflect(r.content, path)))
+            if r.status_code == 200:
+                soft404_sizes.append(len(r.content))
         except Exception:
             pass
 
-    return {"homepage_hash": homepage_hash, "soft404_hashes": soft404_hashes}
+    return {"homepage_hash": homepage_hash, "soft404_hashes": soft404_hashes,
+            "soft404_sizes": soft404_sizes}
 
 
 def _severity(path: str, status: int) -> str:
@@ -181,7 +220,11 @@ async def _probe(client: httpx.AsyncClient, base_url: str, path: str, baseline: 
     if status == 200:
         if baseline["homepage_hash"] and bh == baseline["homepage_hash"]:
             return None
-        if bh in baseline["soft404_hashes"]:
+        if bh in baseline["soft404_hashes"] or _body_hash(_unreflect(body, path)) in baseline["soft404_hashes"]:
+            return None
+        # The server answers garbage paths with 200: a probe the same size as
+        # that answer is the same page.
+        if any(_near(len(body), n) for n in baseline.get("soft404_sizes") or []):
             return None
         if b"404" in body[:2000] and b"not found" in body[:2000].lower():
             return None
@@ -222,6 +265,9 @@ async def _run_async(base_url: str) -> tuple[list[dict], list[dict]]:
     deduped.sort(key=lambda x: {"critical": 0, "high": 1, "medium": 2, "info": 3}.get(x["severity"], 99))
     found      = [i for i in deduped if not i.get("restricted")]
     restricted = [i for i in deduped if i.get("restricted")]
+    found, dropped = drop_catch_all(found)
+    if dropped:
+        logger.info(f"[admin] {base_url}: dropped {dropped} near-identical 200 responses (catch-all)")
     return found, restricted
 
 

@@ -188,6 +188,28 @@ def _naabu_open_ports(host: str) -> list[int] | None:
     return result.get("ports") or []
 
 
+# A CDN/WAF edge (Imperva, Cloudflare...) or a tarpit completes the TCP
+# handshake on almost any port and then never speaks: the "open" ports belong to
+# the proxy, not to a service of the client. A host genuinely exposing this
+# many of the common ports would also greet on at least some of them.
+WALL_MIN_OPEN = 12
+WALL_SILENT_RATIO = 0.8
+_WEB_PORTS = (80, 443)
+
+
+def drop_edge_wall(open_ports: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(kept, dropped). When nearly every open port is silent, only the web
+    ports and the ports that actually answered with a banner are real."""
+    if len(open_ports) < WALL_MIN_OPEN:
+        return open_ports, []
+    silent = [p for p in open_ports if not p.get("banner")]
+    if len(silent) / len(open_ports) < WALL_SILENT_RATIO:
+        return open_ports, []
+    kept = [p for p in open_ports if p.get("banner") or p["port"] in _WEB_PORTS]
+    dropped = [p for p in open_ports if p not in kept]
+    return kept, dropped
+
+
 def run(domain: str) -> dict[str, Any]:
     try:
         ip = socket.gethostbyname(domain)
@@ -218,6 +240,10 @@ def run(domain: str) -> dict[str, Any]:
                     open_ports.append(result)
 
     open_ports.sort(key=lambda x: x["port"])
+    open_ports, wall_dropped = drop_edge_wall(open_ports)
+    if wall_dropped:
+        logger.info(f"[ports] {domain} ({ip}): {len(wall_dropped)} silent ports ignored "
+                    "(CDN/WAF edge or tarpit accepting any connection)")
     risky   = [p for p in open_ports if p["risky"]]
     unauth  = [p for p in open_ports if p.get("unauthenticated")]
 
@@ -283,6 +309,9 @@ def run(domain: str) -> dict[str, Any]:
         "total_open":              len(open_ports),
         "risky_ports":             len(risky),
         "unauthenticated_services": unauth_services,
+        # Ports that accepted the connection but never spoke — an edge proxy,
+        # not the client's services. Not counted, not reported as findings.
+        "edge_wall_ports":         [p["port"] for p in wall_dropped],
         "risk":                    risk,
         "findings":                findings,
     }
