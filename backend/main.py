@@ -3510,7 +3510,7 @@ async def _run_triage(findings: list[Finding], state: dict | None = None) -> dic
                 continue
             finding.triage = triage.stamp(verdict, evidence_hash)
             await finding.save(update_fields=["triage"])
-            if (path := triage.path_of(finding.text)):
+            if finding.module in triage.PATH_MODULES and (path := triage.path_of(finding.text)):
                 await learned_paths.set_verdict(path, verdict["verdict"])
             stats["analyzed"] += 1
             stats["suggested_dismissal" if verdict["verdict"] in triage.SUGGESTS_DISMISSAL else "confirmed"] += 1

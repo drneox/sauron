@@ -277,8 +277,8 @@ const en = {
     chainScopeNew: 'New subdomains only',
     chainScopeAll: 'All active subdomains',
     chainScopeHint: '"All" re-evaluates every DNS-active host on each scan (capped)',
-    triageToggle: 'AI triage of path findings',
-    triageDesc: 'After each scan, the AI reviews open path findings (WordPress REST listings, admin or file paths…) and suggests which are public by design or noise. It only suggests: status and score never change until you accept. Sends the path, status, size and a short, secret-redacted snippet of the response to the AI provider; secret-bearing paths (.env, wp-config, dumps…) are never sent.',
+    triageToggle: 'AI triage of noisy findings',
+    triageDesc: 'After each scan, the AI reviews open path findings (WordPress REST listings, admin or file paths…), brand mentions on GitHub/Postman and library CVEs, and suggests which are public by design or noise (for CVEs only when the CVE\'s own description rules it out). It only suggests: status and score never change until you accept. Sends the path, status, size and a short, secret-redacted snippet of the response (or the finding text for mentions and CVEs) to the AI provider; secret-bearing paths (.env, wp-config, dumps…) are never sent.',
     triageNeedsAi: 'Requires the AI to be configured.',
     learned: {
       title: 'Learned paths',
@@ -1541,8 +1541,8 @@ const es: typeof en = {
     chainScopeNew: 'Solo subdominios nuevos',
     chainScopeAll: 'Todos los subdominios activos',
     chainScopeHint: '«Todos» reevalúa cada host con DNS activo en cada escaneo (con límite)',
-    triageToggle: 'Triaje con IA de hallazgos de rutas',
-    triageDesc: 'Tras cada escaneo, la IA revisa los hallazgos abiertos de rutas (listados REST de WordPress, rutas de administración o archivos…) y sugiere cuáles son públicos por diseño o ruido. Solo sugiere: el estado y la calificación no cambian hasta que aceptes. Envía al proveedor de IA la ruta, el estado, el tamaño y un fragmento corto de la respuesta con secretos redactados; las rutas que contienen secretos (.env, wp-config, volcados…) nunca se envían.',
+    triageToggle: 'Triaje con IA de hallazgos ruidosos',
+    triageDesc: 'Tras cada escaneo, la IA revisa los hallazgos abiertos de rutas (listados REST de WordPress, rutas de administración o archivos…), las menciones de la marca en GitHub/Postman y los CVE de librerías, y sugiere cuáles son públicos por diseño o ruido (en los CVE solo cuando la propia descripción del CVE lo descarta). Solo sugiere: el estado y la calificación no cambian hasta que aceptes. Envía al proveedor de IA la ruta, el estado, el tamaño y un fragmento corto de la respuesta con secretos redactados (o el texto del hallazgo en menciones y CVE); las rutas que contienen secretos (.env, wp-config, volcados…) nunca se envían.',
     triageNeedsAi: 'Requiere tener la IA configurada.',
     learned: {
       title: 'Rutas aprendidas',

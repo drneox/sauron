@@ -103,5 +103,54 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(json.loads(sent["messages"][1]["content"]), {"items": self.ITEMS})
 
 
+MENTION = "GitHub repository related to brand 'acme': someone/acme-demo (0 stars) — https://github.com/someone/acme-demo"
+CVE = "[MEDIUM] jquery 1.8.3: CVE-2019-11358 — jQuery before 3.4.0 mishandles jQuery.extend(true, {}, ...) (fix: 3.4.0)"
+
+
+class OtherKindsTests(unittest.TestCase):
+    def test_brand_mentions_are_candidates_even_though_they_are_info(self):
+        [(_, item, _)] = triage.candidates([finding(module="api_exposure", category="info", text=MENTION, evidence=None)])
+        self.assertEqual(item["kind"], "mention")
+        self.assertIn("acme-demo", item["text"])
+        self.assertNotIn("snippet", item)
+
+    def test_an_exposed_openapi_spec_is_not_judged_from_text(self):
+        text = "OpenAPI spec (Swagger JSON) accessible at http://api.example.com/swagger.json (HTTP 200)"
+        self.assertEqual(triage.candidates([finding(module="api_exposure", category="exposure", text=text, evidence=None)]), [])
+
+    def test_cve_findings_are_candidates_with_their_description(self):
+        [(_, item, _)] = triage.candidates([finding(module="frontend_cve", category="vulnerability", text=CVE, evidence=None)])
+        self.assertEqual(item["kind"], "cve")
+        self.assertIn("CVE-2019-11358", item["text"])
+
+    def test_verdict_is_not_asked_again_and_ignores_severity_tag(self):
+        [(_, _, h)] = triage.candidates([finding(module="frontend_cve", category="vulnerability", text=CVE, evidence=None)])
+        judged = finding(module="frontend_cve", category="vulnerability", evidence=None,
+                         text=CVE.replace("[MEDIUM]", "[HIGH]"), previous={"verdict": "confirmed", "hash": h})
+        self.assertEqual(triage.candidates([judged]), [])
+
+    def test_info_findings_of_other_modules_stay_out(self):
+        self.assertEqual(triage.candidates([finding(module="frontend_cve", category="info", text=CVE, evidence=None)]), [])
+        self.assertEqual(triage.candidates([finding(module="headers", category="exposure", text="x", evidence=None)]), [])
+
+    def test_mixed_batch_asks_one_question_per_kind(self):
+        items = [{"id": 1, "kind": "mention", "text": MENTION}, {"id": 2, "kind": "cve", "text": CVE}]
+        replies = iter([
+            {"choices": [{"message": {"content": json.dumps({"verdicts": [{"id": 2, "verdict": "confirmed", "reason": "x"}]})}}]},
+            {"choices": [{"message": {"content": json.dumps({"verdicts": [{"id": 1, "verdict": "noise", "reason": "y"}]})}}]},
+        ])
+        with mock.patch.dict(os.environ, {"AI_API_KEY": "k"}), \
+             mock.patch.object(triage, "_chat_request", side_effect=lambda *a: next(replies)) as call:
+            out = triage.classify(items)
+        self.assertEqual(call.call_count, 2)
+        systems = {c.args[3]["messages"][0]["content"] for c in call.call_args_list}
+        self.assertEqual(systems, {triage.MENTION_PROMPT, triage.CVE_PROMPT})
+        self.assertEqual({k: v["verdict"] for k, v in out.items()}, {1: "noise", 2: "confirmed"})
+
+    def test_cve_prompt_defaults_to_confirmed(self):
+        self.assertIn('answer "confirmed"', triage.CVE_PROMPT)
+        self.assertIn("never dismiss a CVE", triage.CVE_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()
