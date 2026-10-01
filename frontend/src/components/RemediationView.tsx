@@ -240,6 +240,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
   const [leakcheckAvailable, setLeakcheckAvailable] = useState(false)
   const [aiConfigured, setAiConfigured] = useState(false)
   const [suggestedOnly, setSuggestedOnly] = useState(false)
+  const [triageNotice, setTriageNotice] = useState('')
   const [filter, setFilter] = useState<StatusFilter>('open')
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('all')
   const [page, setPage] = useState(1)
@@ -279,7 +280,9 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
 
   const startTriage = async () => {
     try {
-      await axios.post(`/api/companies/${company.id}/triage`)
+      setTriageNotice('')
+      const { data: started } = await axios.post<{ started: boolean; running: boolean }>(`/api/companies/${company.id}/triage`)
+      if (!started.started && !started.running) setTriageNotice(t('remediation.triage.nothingToAnalyze'))
       await load(true)
     } catch (err) {
       alert(axios.isAxiosError(err) ? err.response?.data?.detail || err.message : t('remediation.triage.error'))
@@ -432,6 +435,12 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
       </div>
 
       {error && <div className="card border-red-200 bg-red-50 text-red-700 text-sm">{error}</div>}
+      {triageNotice && (
+        <div className="card border-violet-200 bg-violet-50 text-violet-800 text-sm flex items-start justify-between gap-3">
+          <span>{triageNotice}</span>
+          <button onClick={() => setTriageNotice('')} className="text-violet-500 hover:text-violet-800" aria-label="close">✕</button>
+        </div>
+      )}
 
       {/* Status filter */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
