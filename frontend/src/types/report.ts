@@ -1132,6 +1132,9 @@ export interface GlobalAssetsDiff {
 export interface ScanReport {
   scan_id: string
   domain: string
+  /** Set when the scanned domain belongs to a company (links to its remediation view) */
+  company_id?: number
+  kind?: string
   status: 'completed'
   scanned_at: string
   completed_at: string

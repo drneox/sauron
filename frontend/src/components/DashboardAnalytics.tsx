@@ -55,7 +55,7 @@ interface Analytics {
   per_company: { company: string; critical: number; high: number; medium: number; low: number; score: number | null; grade: string | null }[]
   surface_timeline: Record<string, unknown>[]
   rating_trend: { date: string; company: string; score: number }[]
-  remediation: { company: string; open: number; accepted: number; fixed: number }[]
+  remediation: { company: string; open: number; accepted: number; fixed: number; false_positive?: number }[]
   assets_per_company: Record<string, string | number>[]
 }
 
@@ -238,6 +238,7 @@ export default function DashboardAnalytics({ companyId, domain = null }: { compa
                 <Legend formatter={(v) => <span style={chartText}>{v}</span>} />
                 <Bar dataKey="fixed" stackId="r" fill="#059669" />
                 <Bar dataKey="accepted" stackId="r" fill="#d97706" />
+                <Bar dataKey="false_positive" stackId="r" fill="#94a3b8" />
                 <Bar dataKey="open" stackId="r" fill="#dc2626" radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>

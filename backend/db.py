@@ -133,7 +133,7 @@ class Finding(Model):
     """Persistent remediation-tracked finding. Scans are ephemeral; a Finding
     row survives across scans, keyed by a stable fingerprint
     (domain + module + normalized finding text), and carries a lifecycle
-    status (open|accepted|fixed) plus compliance-framework tags."""
+    status (open|accepted|fixed|false_positive) plus compliance-framework tags."""
     id = fields.IntField(pk=True)
     domain = fields.ForeignKeyField("models.Domain", related_name="findings")
     fingerprint = fields.TextField()  # sha1(domain|module|normalized text)
@@ -157,7 +157,7 @@ class Finding(Model):
     risk = fields.CharField(max_length=16)  # critical|high|medium|low|info
     category = fields.CharField(max_length=32, default="info")  # vulnerability|misconfiguration|exposure|info
     frameworks = fields.JSONField(default=list)  # e.g. ["NIST-CSF", "ISO-27001"]
-    status = fields.CharField(max_length=16, default="open")  # open|accepted|fixed
+    status = fields.CharField(max_length=16, default="open")  # open|accepted|fixed|false_positive
     first_seen_scan_id = fields.CharField(max_length=36)
     last_seen_scan_id = fields.CharField(max_length=36)
     first_seen_at = fields.DatetimeField()

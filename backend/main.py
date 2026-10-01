@@ -2598,6 +2598,15 @@ async def _scan_result_for_role(result: dict, req: Request) -> dict:
     return _strip_secret_values(result)
 
 
+async def _company_link(domain_id: int | None) -> dict:
+    """{"company_id": n} when the scan's domain belongs to a company, so the
+    report can link to that company's remediation view."""
+    if domain_id is None:
+        return {}
+    dom = await Domain.get_or_none(id=domain_id)
+    return {"company_id": dom.company_id} if dom is not None and dom.company_id else {}
+
+
 @app.get("/api/scan/{scan_id}")
 async def get_scan(scan_id: str, req: Request):
     scan = SCANS.get(scan_id)
@@ -2624,14 +2633,14 @@ async def get_scan(scan_id: str, req: Request):
                 payload["agent_steps"] = scan["agent_steps"]
             return payload
         result = await _scan_result_for_role(scan["result"], req)
-        return result | {"scan_id": scan_id, "status": "completed"}
+        return result | {"scan_id": scan_id, "status": "completed"} | await _company_link(scan.get("domain_id"))
 
     row = await Scan.filter(id=scan_id).select_related("domain").first()
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if row.status == "completed" and row.result:
         result = await _scan_result_for_role(row.result, req)
-        return result | {"scan_id": scan_id, "status": "completed"}
+        return result | {"scan_id": scan_id, "status": "completed"} | await _company_link(row.domain_id)
     return {
         "scan_id": scan_id,
         "domain": row.domain.domain,
@@ -3196,7 +3205,7 @@ async def _build_company_findings(company: Company, host: str | None = None) -> 
     # the remediation view instead of the raw scan snapshot.
     closed_fps: dict[int, set[str]] = {}
     async for rec in Finding.filter(domain_id__in=[d.id for d in domains],
-                                    status__in=["accepted", "fixed"]):
+                                    status__in=["accepted", "fixed", "false_positive"]):
         closed_fps.setdefault(rec.domain_id, set()).add(rec.fingerprint)
     out_domains: list[dict] = []
     for d in domains:
@@ -3284,7 +3293,11 @@ async def company_findings(company_id: int, host: str | None = None):
 
 
 # ── Remediation tracking & compliance mapping ─────────────────────────────────
-FINDING_STATUSES = {"open", "accepted", "fixed"}
+# open → still to handle; accepted → real, risk knowingly accepted; false_positive
+# → not a problem (the scanner or the AI triage misjudged it, or it is public by
+# design); fixed → gone. accepted and false_positive are operator decisions that
+# survive re-detection; neither counts as an open defect.
+FINDING_STATUSES = {"open", "accepted", "fixed", "false_positive"}
 
 
 def _serialize_finding(rec: Finding) -> dict:
@@ -3423,7 +3436,7 @@ async def company_remediations(company_id: int, host: str | None = None):
     risk_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
     by_domain: dict[int, list[dict]] = {d.id: [] for d in domains}
     totals = {
-        "open": 0, "accepted": 0, "fixed": 0,
+        "open": 0, "accepted": 0, "fixed": 0, "false_positive": 0,
         "by_risk": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "auto_fixed_week": 0,
     }
@@ -3432,7 +3445,7 @@ async def company_remediations(company_id: int, host: str | None = None):
         serialized = _serialize_finding(rec)
         if rec.domain_id in by_domain:
             by_domain[rec.domain_id].append(serialized)
-        if rec.status in ("open", "accepted", "fixed"):
+        if rec.status in ("open", "accepted", "fixed", "false_positive"):
             totals[rec.status] += 1
         if rec.status == "open" and rec.risk in totals["by_risk"]:
             totals["by_risk"][rec.risk] += 1
@@ -3444,7 +3457,7 @@ async def company_remediations(company_id: int, host: str | None = None):
             by_domain[d.id],
             key=lambda f: (risk_rank.get(f["risk"], 9), f["status"] != "open", f["text"]),
         )
-        counts = {"open": 0, "accepted": 0, "fixed": 0}
+        counts = {"open": 0, "accepted": 0, "fixed": 0, "false_positive": 0}
         for f in items:
             counts[f["status"]] = counts.get(f["status"], 0) + 1
         out_domains.append({"domain": d.domain, "counts": counts, "findings": items})
@@ -3586,7 +3599,7 @@ async def company_compliance(company_id: int):
     for rec in records:
         # Compliance measures defects mapped to controls. Informational findings
         # are neither fixable nor a gap, and would inflate every denominator.
-        if rec.category == "info":
+        if rec.category == "info" or rec.status == "false_positive":
             continue
         frameworks = rec.frameworks or []
         if not frameworks:
@@ -3736,9 +3749,9 @@ async def dashboard_analytics(company_id: int | None = Query(default=None), doma
         if cid is None:
             continue
         rm = remediation_map.setdefault(cid, {
-            "company": comp_map.get(cid, "?"), "open": 0, "accepted": 0, "fixed": 0,
+            "company": comp_map.get(cid, "?"), "open": 0, "accepted": 0, "fixed": 0, "false_positive": 0,
         })
-        rm[f.status if f.status in ("open", "accepted", "fixed") else "open"] += 1
+        rm[f.status if f.status in ("open", "accepted", "fixed", "false_positive") else "open"] += 1
 
     return {
         "scope_company": comp_map.get(company_id),

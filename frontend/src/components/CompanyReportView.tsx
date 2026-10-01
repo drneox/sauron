@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import {
   ArrowLeft,
+  ClipboardCheck,
   Cpu,
   Download,
   FileWarning,
@@ -274,6 +275,13 @@ export default function CompanyReportView({ company, onBack, onOpenReport }: Pro
             ))}
           </div>
         )}
+        <Link
+          to={`/companies/${company.id}/remediations${hostFilter ? `?host=${encodeURIComponent(hostFilter)}` : ''}`}
+          className="btn-secondary inline-flex items-center gap-1.5"
+          title={t('report.openRemediationTitle')}
+        >
+          <ClipboardCheck className="w-4 h-4" /> {t('dashboard.remediation')}
+        </Link>
         <button
           onClick={handleDownloadPdf}
           disabled={downloadingPdf}

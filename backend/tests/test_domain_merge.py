@@ -82,6 +82,17 @@ class MergeFindingsTests(unittest.TestCase):
         self.assertEqual(row.status, "accepted")
         self.assertEqual(row.notes, "risk accepted by CISO")
 
+    def test_false_positive_is_an_operator_decision_and_survives(self):
+        async def go():
+            _, owned, orphan = await _pair()
+            await _finding(owned, "fp1", "open", seen_days=8)
+            await _finding(orphan, "fp1", "false_positive", seen_days=1, notes="IA: public by design")
+            await merge_domain_into(orphan, owned)
+            return await Finding.get(domain_id=owned.id, fingerprint="fp1")
+        row = run(go)
+        self.assertEqual(row.status, "false_positive")
+        self.assertEqual(row.notes, "IA: public by design")
+
     def test_unique_findings_move_and_first_seen_keeps_the_earliest(self):
         async def go():
             _, owned, orphan = await _pair()

@@ -10,8 +10,8 @@ losing anything and without letting a stale copy overwrite a newer one.
 Conflict rules (rows that exist on both sides):
   - assets / subdomains / endpoints: the target row stays; the source's
     observation wins only when it is newer, first-seen keeps the earliest.
-  - findings: first-seen keeps the earliest. An `accepted` status is an
-    operator decision and survives either way; otherwise the side whose
+  - findings: first-seen keeps the earliest. An `accepted` or `false_positive`
+    status is an operator decision and survives either way; otherwise the side whose
     latest event is newer decides open vs fixed (an `open` sighting after a
     `fixed_at` reopens the finding — exactly what the false auto-closes of
     host findings need).
@@ -27,6 +27,9 @@ from tortoise.transactions import in_transaction
 from db import Asset, AssetHistory, Domain, Endpoint, Finding, Scan, Schedule, Subdomain
 
 logger = logging.getLogger(__name__)
+
+# Statuses an operator set on purpose: a re-detection never overrides them.
+DECIDED = ("accepted", "false_positive")
 
 EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -77,17 +80,17 @@ def reconcile_findings(keep: Finding, other: Finding) -> dict[str, Any]:
         "host": newer_seen.host or keep.host or other.host,
         "triage": newer_seen.triage if newer_seen.triage is not None else keep.triage or other.triage,
     }
-    if "accepted" in (keep.status, other.status):
-        accepted = keep if keep.status == "accepted" else other
-        values["status"] = "accepted"
+    if keep.status in DECIDED or other.status in DECIDED:
+        decided = keep if keep.status in DECIDED else other
+        values["status"] = decided.status
         values["fixed_at"] = None
-        values["notes"] = accepted.notes
+        values["notes"] = decided.notes
     else:
         winner = keep if _finding_event_time(keep) >= _finding_event_time(other) else other
         values["status"] = winner.status
         values["fixed_at"] = winner.fixed_at if winner.status == "fixed" else None
         values["notes"] = keep.notes or other.notes
-    if keep.notes and other.notes and keep.notes != other.notes and values["status"] != "accepted":
+    if keep.notes and other.notes and keep.notes != other.notes and values["status"] not in DECIDED:
         values["notes"] = f"{keep.notes}\n{other.notes}"
     return values
 

@@ -1,9 +1,10 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { ScanReport } from '../types/report'
 import { getToken } from '../auth'
 import { RiskBadge } from './ui'
-import { Download, Plus } from 'lucide-react'
+import { ClipboardCheck, Download, Plus } from 'lucide-react'
 import ScoreCard from './sections/ScoreCard'
 import FindingsPanel from './sections/FindingsPanel'
 import ChangesSection from './sections/ChangesSection'
@@ -88,6 +89,16 @@ export default function ReportView({ report, onNewScan }: Props) {
           </p>
         </div>
         <div className="flex gap-2">
+          {report.company_id != null && (
+            <Link
+              to={`/companies/${report.company_id}/remediations${report.kind === 'host' ? `?host=${encodeURIComponent(report.domain)}` : ''}`}
+              className="btn-secondary"
+              title={t('report.openRemediationTitle')}
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              {t('dashboard.remediation')}
+            </Link>
+          )}
           <button
             onClick={onNewScan}
             className="btn-secondary"

@@ -44,7 +44,7 @@ export interface RemediationFinding {
   risk: 'low' | 'medium' | 'high' | 'critical' | 'info'
   category: string
   frameworks: string[]
-  status: 'open' | 'accepted' | 'fixed'
+  status: 'open' | 'accepted' | 'fixed' | 'false_positive'
   notes: string
   first_seen_scan_id: string
   last_seen_scan_id: string
@@ -67,6 +67,7 @@ interface RemediationsResponse {
     open: number
     accepted: number
     fixed: number
+    false_positive: number
     by_risk: Record<string, number>
     auto_fixed_week: number
   }
@@ -170,7 +171,7 @@ function LeakcheckLookup({ available }: { available: boolean }) {
   )
 }
 
-type StatusFilter = 'all' | 'open' | 'accepted' | 'fixed'
+type StatusFilter = 'all' | 'open' | 'accepted' | 'false_positive' | 'fixed'
 type CategoryFilter = 'all' | 'vulnerability' | 'misconfiguration' | 'exposure' | 'info'
 
 type Row = RemediationFinding & { domain: string }
@@ -221,6 +222,7 @@ function EvidenceValue({ value }: { value: string | number | string[] }) {
 const STATUS_STYLE: Record<string, string> = {
   open: 'bg-red-50 text-red-700 border-red-200',
   accepted: 'bg-amber-50 text-amber-700 border-amber-200',
+  false_positive: 'bg-slate-100 text-slate-600 border-slate-300',
   fixed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
 }
 
@@ -300,7 +302,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     if (!suggestedRows.length || !window.confirm(t('remediation.triage.confirmAcceptAll', { count: suggestedRows.length }))) return
     setBusy(-1)
     const results = await Promise.allSettled(suggestedRows.map((r) =>
-      axios.put(`/api/findings/${r.id}/status`, { status: 'accepted', notes: `IA: ${r.triage?.reason ?? ''}`.trim() })))
+      axios.put(`/api/findings/${r.id}/status`, { status: 'false_positive', notes: `IA: ${r.triage?.reason ?? ''}`.trim() })))
     const failed = results.filter((x) => x.status === 'rejected').length
     if (failed) alert(t('remediation.triage.acceptAllPartial', { failed }))
     setSuggestedOnly(false)
@@ -313,17 +315,19 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
   }, {})
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
-  const updateStatus = async (row: Row, status: 'accepted' | 'fixed' | 'open') => {
+  const updateStatus = async (row: Row, status: 'accepted' | 'false_positive' | 'fixed' | 'open') => {
     const plainText = splitAgentTool(row.module, row.text).text.slice(0, 120)
     const confirmMsg = status === 'fixed'
       ? t('remediation.confirmFixed', { text: plainText })
       : status === 'accepted'
         ? t('remediation.confirmAccept', { text: plainText })
-        : t('remediation.confirmReopen', { text: plainText })
+        : status === 'false_positive'
+          ? t('remediation.confirmFalsePositive', { text: plainText })
+          : t('remediation.confirmReopen', { text: plainText })
     if (!window.confirm(confirmMsg)) return
     setBusy(row.id)
     try {
-      const note = status === 'accepted' && suggestsDismissal(row) ? `IA: ${row.triage?.reason ?? ''}`.trim() : undefined
+      const note = status === 'false_positive' && suggestsDismissal(row) ? `IA: ${row.triage?.reason ?? ''}`.trim() : undefined
       const { data: updated } = await axios.put<RemediationFinding>(
         `/api/findings/${row.id}/status`, { status, ...(note ? { notes: note } : {}) })
       setData((prev) => {
@@ -353,6 +357,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
     { key: 'all', label: t('remediation.filterAll') },
     { key: 'open', label: t('remediation.status.open') },
     { key: 'accepted', label: t('remediation.status.accepted') },
+    { key: 'false_positive', label: t('remediation.status.false_positive') },
     { key: 'fixed', label: t('remediation.status.fixed') },
   ]
 
@@ -445,7 +450,7 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
               {f.label}
               {data && f.key !== 'all' && (
                 <span className="ml-1.5 font-mono text-[10px] text-dark-500">
-                  {f.key === 'open' ? data.totals.open : f.key === 'accepted' ? data.totals.accepted : data.totals.fixed}
+                  {f.key === 'open' ? data.totals.open : f.key === 'accepted' ? data.totals.accepted : f.key === 'false_positive' ? (data.totals.false_positive ?? 0) : data.totals.fixed}
                 </span>
               )}
             </button>
@@ -614,6 +619,17 @@ export default function RemediationView({ company, readOnly = false, onBack }: P
                                   className="text-[11px] px-2 py-1 rounded-md border border-dark-700 text-dark-300 hover:bg-amber-50 hover:text-amber-700 hover:border-amber-200 transition-colors duration-150 disabled:opacity-40"
                                 >
                                   {t('remediation.accept')}
+                                </button>
+                                <button
+                                  onClick={() => updateStatus(row, 'false_positive')}
+                                  disabled={busy === row.id}
+                                  title={t('remediation.falsePositiveTitle')}
+                                  className={clsx(
+                                    'text-[11px] px-2 py-1 rounded-md border transition-colors duration-150 disabled:opacity-40 hover:bg-slate-100 hover:text-slate-700 hover:border-slate-300',
+                                    suggestsDismissal(row) ? 'border-violet-300 text-violet-700' : 'border-dark-700 text-dark-300',
+                                  )}
+                                >
+                                  {t('remediation.falsePositive')}
                                 </button>
                                 <button
                                   onClick={() => updateStatus(row, 'fixed')}
