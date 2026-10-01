@@ -940,6 +940,7 @@ const en = {
     },
   },
   report: {
+    dismissedHidden: '{{count}} finding(s) hidden: accepted or marked as false positive (see Remediation)',
     openRemediationTitle: 'Track and close these findings in the remediation view',
     withCount: '{{label}} ({{count}})',
     newBadge: 'NEW',
@@ -2202,6 +2203,7 @@ const es: typeof en = {
     },
   },
   report: {
+    dismissedHidden: '{{count}} hallazgo(s) oculto(s): aceptados o marcados como falso positivo (ver Remediación)',
     openRemediationTitle: 'Seguir y cerrar estos hallazgos en la vista de remediación',
     withCount: '{{label}} ({{count}})',
     newBadge: 'NUEVO',

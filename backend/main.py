@@ -47,6 +47,7 @@ from scoring import (
     RISK_ORDER,
     finding_category as _finding_category,
     finding_risk,
+    line_risk,
     grade_of_score as _grade_of_score,
     max_risk as _max_risk,
     overall_score as _overall_score,
@@ -223,6 +224,10 @@ async def lifespan(app: FastAPI):
         await finding_fingerprint.ensure_current()
     except Exception:
         logger.exception("Finding fingerprint re-keying failed (will retry on next start)")
+    try:
+        await _apply_scoring_model()
+    except Exception:
+        logger.exception("Applying the scoring model failed (will retry on next start)")
     to_requeue = await _recover_interrupted_scans()
     await scan_queue.start(_run_and_persist_scan)
     for new_id, target, domain_id in to_requeue:
@@ -874,7 +879,7 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
             all_findings.append({
                 "module": mod_name,
                 "finding": finding,
-                "risk": finding_risk(mod_result.get("risk", "low"), category),
+                "risk": finding_risk(mod_result.get("risk", "low"), category, finding),
                 "category": category,
             })
 
@@ -897,7 +902,8 @@ async def _run_scan(scan_id: str, domain: str, on_module_done=None, settings: di
                      "note": "module scan — partial evaluation, no domain rating"}
     else:
         try:
-            scorecard = _overall_score(results)
+            dismissed = await _dismissed_lines(SCANS[scan_id].get("domain_id"), results, domain)
+            scorecard = _overall_score(results, dismissed)
         except Exception as e:
             logger.exception(f"[{scan_id}] Scorecard computation failed — degraded result")
             scorecard = {"score": None, "grade": None, "overall_risk": "low",
@@ -1356,6 +1362,124 @@ def _finding_host(module: str, text: str, scan_target: str | None, result: dict 
         if found is not None:
             return found[1].get("target") or scan_target or None
     return scan_target or None
+
+
+# Statuses a person set on purpose; their lines no longer count in the score.
+DISMISSED_STATUSES = ("accepted", "false_positive")
+
+
+async def _dismissed_lines(domain_id: int | None, modules: dict, scan_target: str | None) -> dict[str, set[int]]:
+    """{module: indexes of its finding lines} that a person accepted or marked
+    as false positive, matched by the same fingerprint the Finding rows use."""
+    if domain_id is None:
+        return {}
+    fps = set(await Finding.filter(domain_id=domain_id, status__in=list(DISMISSED_STATUSES))
+              .values_list("fingerprint", flat=True))
+    if not fps:
+        return {}
+    dom = await Domain.get_or_none(id=domain_id)
+    fallback = dom.domain if dom is not None else ""
+    ctx = {"domain": scan_target, "modules": modules}
+    out: dict[str, set[int]] = {}
+    for name, mod in modules.items():
+        if not isinstance(mod, dict):
+            continue
+        for i, finding in enumerate(mod.get("findings") or []):
+            text = _finding_text(finding)
+            host = _finding_host(name, text, scan_target, ctx) or fallback
+            if _finding_fingerprint(host, name, text) in fps:
+                out.setdefault(name, set()).add(i)
+    return out
+
+
+async def _rescore_scan(scan: Scan) -> bool:
+    """Recompute a stored scan's scorecard now that findings were accepted or
+    dismissed. Module scans carry no score. Returns whether it changed."""
+    result = scan.result or {}
+    modules = result.get("modules")
+    if not isinstance(modules, dict) or result.get("kind") == "module":
+        return False
+    old = result.get("scorecard") or {}
+    if old.get("score") is None and old.get("error"):
+        return False
+    dismissed = await _dismissed_lines(scan.domain_id, modules, result.get("domain"))
+    new = _overall_score(modules, dismissed)
+    # Agent findings are appended after the deterministic score and only ever
+    # raise overall_risk / the category tally (never the number): keep that.
+    agent_lines = [f for f in result.get("findings") or [] if isinstance(f, dict) and f.get("module") == "agent"]
+    if agent_lines:
+        fps = set(await Finding.filter(domain_id=scan.domain_id, status__in=list(DISMISSED_STATUSES))
+                  .values_list("fingerprint", flat=True))
+        dom = await Domain.get_or_none(id=scan.domain_id)
+        live = [f for f in agent_lines
+                if _finding_fingerprint(
+                    _finding_host("agent", _finding_text(f.get("finding")), result.get("domain"), result)
+                    or (dom.domain if dom else ""),
+                    "agent", _finding_text(f.get("finding"))) not in fps]
+        for f in live:
+            cat = f.get("category") or _finding_category("agent", f.get("finding"))
+            new["findings_by_category"][cat] = new["findings_by_category"].get(cat, 0) + 1
+        new["overall_risk"] = _max_risk(new["overall_risk"], *(f["risk"] for f in live if f.get("risk") in RISK_ORDER))
+    merged = {**old, **new}
+    # Lines show their own severity too (see scoring.line_risk).
+    relabeled = False
+    for f in result.get("findings") or []:
+        if isinstance(f, dict) and f.get("category") != "info" and f.get("risk") in RISK_ORDER:
+            own = line_risk(f["risk"], f.get("finding"))
+            if own != f["risk"]:
+                f["risk"], relabeled = own, True
+    if merged == old and not relabeled:
+        return False
+    result["scorecard"] = merged
+    await Scan.filter(id=scan.id).update(scorecard=merged, result=result)
+    return True
+
+
+SCORING_MODEL_VERSION = 2   # 2 = per-line severity + dismissed lines out of the score
+_SCORING_VERSION_KEY = "scoring_model_version"
+
+
+async def _apply_scoring_model() -> dict[str, int]:
+    """Once per SCORING_MODEL_VERSION: relabel stored findings with their own
+    severity and recompute the latest scorecard of every domain / host so the
+    dashboards follow the current rules right away (older history keeps the
+    scores it was given at the time)."""
+    row = await AppSetting.get_or_none(key=_SCORING_VERSION_KEY)
+    if row is not None and row.value == SCORING_MODEL_VERSION:
+        return {}
+    stats = {"findings": 0, "scans": 0}
+    for rec in await Finding.exclude(category="info"):
+        own = line_risk(rec.risk, rec.text)
+        if own != rec.risk:
+            await Finding.filter(id=rec.id).update(risk=own)
+            stats["findings"] += 1
+    # Keys first (results are large): only the newest scan per domain / host.
+    latest: dict[tuple, str] = {}
+    for sc in await Scan.filter(status="completed", kind__in=["full", "discover", "host"]) \
+            .order_by("-completed_at").values("id", "domain_id", "kind", "scan_target"):
+        latest.setdefault((sc["domain_id"], "host" if sc["kind"] == "host" else "domain", sc["scan_target"]), sc["id"])
+    for scan_id in latest.values():
+        scan = await Scan.get_or_none(id=scan_id)
+        if scan is not None and await _rescore_scan(scan):
+            stats["scans"] += 1
+    await AppSetting.update_or_create(key=_SCORING_VERSION_KEY, defaults={"value": SCORING_MODEL_VERSION})
+    logger.info(f"Scoring model v{SCORING_MODEL_VERSION} applied: {stats}")
+    return stats
+
+
+async def _rescore_after_status_change(rec: Finding) -> None:
+    """The scans whose grade a status change can affect: the domain's latest
+    evaluation and the latest host scan of the finding's host."""
+    latest_domain = await Scan.filter(domain_id=rec.domain_id, status="completed",
+                                      kind__in=["full", "discover"]).order_by("-completed_at").first()
+    targets = [latest_domain] if latest_domain else []
+    if rec.host:
+        host_scan = await Scan.filter(domain_id=rec.domain_id, status="completed", kind="host",
+                                      scan_target=rec.host).order_by("-completed_at").first()
+        if host_scan:
+            targets.append(host_scan)
+    for sc in targets:
+        await _rescore_scan(sc)
 
 
 async def _upsert_findings(dom: Domain, result: dict, scan_id: str) -> None:
@@ -2598,6 +2722,32 @@ async def _scan_result_for_role(result: dict, req: Request) -> dict:
     return _strip_secret_values(result)
 
 
+async def _hide_dismissed(result: dict, domain_id: int | None) -> dict:
+    """The scan's report minus the findings a person accepted or marked as
+    false positive (same rule as the company report), plus how many were
+    hidden. The stored scan is untouched: this only shapes the response."""
+    if domain_id is None or not isinstance(result, dict) or not result.get("findings"):
+        return result
+    fps = set(await Finding.filter(domain_id=domain_id, status__in=list(DISMISSED_STATUSES))
+              .values_list("fingerprint", flat=True))
+    if not fps:
+        return result
+    dom = await Domain.get_or_none(id=domain_id)
+    fallback = dom.domain if dom is not None else ""
+    target = result.get("domain")
+    kept = []
+    for f in result["findings"]:
+        if isinstance(f, dict):
+            text = _finding_text(f.get("finding"))
+            module = f.get("module") or "unknown"
+            host = _finding_host(module, text, target, result) or fallback
+            if text and _finding_fingerprint(host, module, text) in fps:
+                continue
+        kept.append(f)
+    hidden = len(result["findings"]) - len(kept)
+    return result | {"findings": kept, "dismissed_findings": hidden} if hidden else result
+
+
 async def _company_link(domain_id: int | None) -> dict:
     """{"company_id": n} when the scan's domain belongs to a company, so the
     report can link to that company's remediation view."""
@@ -2632,14 +2782,14 @@ async def get_scan(scan_id: str, req: Request):
             if scan.get("agent_steps") is not None:
                 payload["agent_steps"] = scan["agent_steps"]
             return payload
-        result = await _scan_result_for_role(scan["result"], req)
+        result = await _hide_dismissed(await _scan_result_for_role(scan["result"], req), scan.get("domain_id"))
         return result | {"scan_id": scan_id, "status": "completed"} | await _company_link(scan.get("domain_id"))
 
     row = await Scan.filter(id=scan_id).select_related("domain").first()
     if row is None:
         raise HTTPException(status_code=404, detail="Scan not found")
     if row.status == "completed" and row.result:
-        result = await _scan_result_for_role(row.result, req)
+        result = await _hide_dismissed(await _scan_result_for_role(row.result, req), row.domain_id)
         return result | {"scan_id": scan_id, "status": "completed"} | await _company_link(row.domain_id)
     return {
         "scan_id": scan_id,
@@ -2772,11 +2922,13 @@ async def download_pdf(scan_id: str, req: Request):
     """Generate and return a PDF report for a completed scan."""
     result = None
     domain = None
+    domain_id = None
     scan = SCANS.get(scan_id)
     if scan is not None:
         if scan["status"] == "completed" and scan.get("result"):
             result = scan["result"]
             domain = scan["domain"]
+            domain_id = scan.get("domain_id")
     else:
         row = await Scan.filter(id=scan_id).select_related("domain").first()
         if row is None:
@@ -2784,9 +2936,10 @@ async def download_pdf(scan_id: str, req: Request):
         if row.status == "completed" and row.result:
             result = row.result
             domain = row.domain.domain
+            domain_id = row.domain_id
     if result is None:
         raise HTTPException(status_code=409, detail="Scan not completed yet")
-    result = await _scan_result_for_role(result, req)
+    result = await _hide_dismissed(await _scan_result_for_role(result, req), domain_id)
     try:
         report_data = result | {"scan_id": scan_id, "status": "completed"}
         pdf_bytes = pdf_report.generate_pdf(report_data)
@@ -3505,6 +3658,11 @@ async def update_finding_status(
         rec.notes = request.notes
     await rec.save()
     logger.info(f"Finding #{rec.id} status -> {status} by {getattr(user, 'email', user)}")
+    if old_status != status and (old_status in DISMISSED_STATUSES or status in DISMISSED_STATUSES):
+        try:
+            await _rescore_after_status_change(rec)
+        except Exception:
+            logger.exception(f"Rescoring after finding #{rec.id} status change failed")
     if old_status != status:
         await audit_log.record("finding.status", user, target=f"finding:{rec.id}",
                                detail={"from": old_status, "to": status,

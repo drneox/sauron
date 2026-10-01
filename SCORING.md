@@ -49,6 +49,22 @@ a category and only non-info categories can lower the score.
 
 A finding dict may carry its own `category`, which wins over the rules.
 
+## Per-line severity and dismissed lines
+
+- **A line keeps its own severity.** A line that starts with `[CRITICAL]`,
+  `[HIGH]`, `[MEDIUM]` or `[LOW]` is weighed (and labeled) at that severity
+  instead of inheriting its module's worst one (`scoring.line_risk`). The
+  module's risk is the ceiling: a tag can lower a line, never raise it. Lines
+  without a tag inherit the module's risk as before.
+- **Accepted and false-positive lines do not count.** Once a person marks a
+  finding `accepted` (risk knowingly accepted) or `false_positive`, its line is
+  left out of the score and the caps (`overall_score(results, dismissed)`). A
+  module that loses lines takes the risk of the lines that remain, so dismissing
+  its one critical line lowers the module as well. The stored scorecard of the
+  domain's latest evaluation and of the host's latest scan is recomputed when a
+  status changes; older scans keep the score they were given at the time. AI
+  suggestions never change anything by themselves: only a person's decision does.
+
 ## 2. Score
 
 ```
@@ -62,7 +78,8 @@ score   = round(clamp(base - penalty, 0, 100))
 - `MODULE_RISK_POINTS`: low 0, medium 25, high 60, critical 100.
 - `FINDING_PENALTY`: critical (25 pts, scale 2), high (12, 5), medium (4, 12) —
   diminishing returns, so repeated findings do not stack forever.
-- `weighted_count` counts finding **lines** (non-info) times their category weight.
+- `weighted_count` counts finding **lines** (non-info, not dismissed) times their
+  category weight, each at its own severity (see above).
 - The score is the real number: it is what ranks and charts domains.
 
 ## 3. Letter and caps
@@ -73,8 +90,8 @@ score   = round(clamp(base - penalty, 0, 100))
   **medium** at **B**. Only the letter is capped, never the number; the result
   then carries `grade_capped_by` so reports can say why.
 - A cap never improves a letter that is already worse.
-- `findings_by_severity` counts **modules affected** per severity (a module with
-  45 lines is one medium), because severity is a property of the module.
+- `findings_by_severity` counts **modules affected**, each at the severity of its
+  worst scored line (a module with 45 lines is one medium, not 45).
 
 ## 4. Where each rule lives
 

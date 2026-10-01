@@ -87,6 +87,11 @@ export default function ReportView({ report, onNewScan }: Props) {
           <p className="text-dark-500 text-xs">
             {t('report.scannedOn', { date: dateStr, count: findings.length })}
           </p>
+          {(report.dismissed_findings ?? 0) > 0 && (
+            <p className="text-xs text-dark-500 mt-0.5">
+              {t('report.dismissedHidden', { count: report.dismissed_findings })}
+            </p>
+          )}
         </div>
         <div className="flex gap-2">
           {report.company_id != null && (

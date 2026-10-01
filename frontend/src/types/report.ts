@@ -1135,6 +1135,8 @@ export interface ScanReport {
   /** Set when the scanned domain belongs to a company (links to its remediation view) */
   company_id?: number
   kind?: string
+  /** Findings left out because a person accepted them or marked them as false positive */
+  dismissed_findings?: number
   status: 'completed'
   scanned_at: string
   completed_at: string

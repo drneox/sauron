@@ -57,11 +57,31 @@ INFO_RISK = "info"
 FINDING_RISK_LEVELS = frozenset(RISK_ORDER) | {INFO_RISK}
 
 
-def finding_risk(module_risk: str, category: str) -> str:
-    """Risk label of one finding line: its module's risk, except informational
-    findings, which carry "info" instead of inheriting the module's worst risk
-    (otherwise "Email hosted on Google Workspace" would read as HIGH)."""
-    return INFO_RISK if category == "info" else module_risk
+_LINE_TAG = re.compile(r"^\[(CRITICAL|HIGH|MEDIUM|LOW)\]", re.IGNORECASE)
+
+
+def line_risk(module_risk: str, finding) -> str:
+    """Risk of one finding line. A line that states its own severity
+    ("[MEDIUM] Path discovered: ...") keeps it instead of inheriting the
+    module's worst one — one /wp-config.php.old in a module must not make every
+    other line of that module read as critical. The module's risk stays the
+    ceiling, so a tag can lower a line but never raise it."""
+    text = finding.get("finding") if isinstance(finding, dict) else finding
+    m = _LINE_TAG.match(text) if isinstance(text, str) else None
+    if not m or module_risk not in RISK_ORDER:
+        return module_risk
+    tagged = m.group(1).lower()
+    return tagged if RISK_ORDER[tagged] <= RISK_ORDER[module_risk] else module_risk
+
+
+def finding_risk(module_risk: str, category: str, finding=None) -> str:
+    """Risk label of one finding line: its own tag or its module's risk, except
+    informational findings, which carry "info" instead of inheriting the
+    module's worst risk (otherwise "Email hosted on Google Workspace" would
+    read as HIGH)."""
+    if category == "info":
+        return INFO_RISK
+    return line_risk(module_risk, finding) if finding is not None else module_risk
 
 
 # ── Finding categories ─────────────────────────────────────────────────────────
@@ -278,7 +298,26 @@ def finding_category(module_name: str, finding) -> str:
     return MODULE_FINDING_CATEGORY.get(module_name, DEFAULT_FINDING_CATEGORY)
 
 
-def overall_score(results: dict) -> dict:
+def _without_dismissed(results: dict, dismissed: dict | None) -> dict:
+    """`results` minus the lines a person dismissed (accepted risk or false
+    positive). `dismissed` maps module -> indexes into its `findings` list. A
+    module that lost lines gets the risk of the lines that remain, so
+    dismissing the one critical line of a module lowers the module too."""
+    if not dismissed:
+        return results
+    out = dict(results)
+    for name, gone in dismissed.items():
+        mod = results.get(name)
+        if not gone or not isinstance(mod, dict):
+            continue
+        kept = [f for i, f in enumerate(mod.get("findings") or []) if i not in gone]
+        base = mod.get("risk", "low")
+        risks = [line_risk(base, f) for f in kept if finding_category(name, f) != "info"]
+        out[name] = {**mod, "findings": kept, "risk": max_risk(*risks) if risks else "low"}
+    return out
+
+
+def overall_score(results: dict, dismissed: dict | None = None) -> dict:
     """Compute a global risk score (0-100) and grade (A-F).
 
     Category-aware model: findings and module risks are weighted by their
@@ -296,6 +335,7 @@ def overall_score(results: dict) -> dict:
         "wayback", "nuclei", "kev", "mobile_apps", "reverse_ip", "subdomain_eval",
         "smart_fuzz",
     ]
+    results = _without_dismissed(results, dismissed)
     weights = MODULE_RISK_POINTS
     module_risks = [results.get(name, {}).get("risk", "low") for name in module_names]
     # Base: module risks scaled by the module's category weight; info modules
@@ -322,19 +362,21 @@ def overall_score(results: dict) -> dict:
         if not isinstance(mod, dict):
             continue
         r = mod.get("risk", "low")
-        scored_lines = 0
+        worst = None
         for finding in mod.get("findings") or []:
             cat = finding_category(mod_name, finding)
             by_category[cat] += 1
-            if cat == "info" or r not in counts:
+            lr = line_risk(r, finding)
+            if cat == "info" or lr not in counts:
                 continue
-            scored_lines += 1
-            weighted[r] += CATEGORY_SCORE_WEIGHT[cat]
-        # Severity is a property of the module (every line inherits it), so the
-        # displayed count is "modules affected": a module with 45 lines is one
-        # medium, not 45. The penalty above keeps its line-based calibration.
-        if scored_lines:
-            counts[r] += 1
+            weighted[lr] += CATEGORY_SCORE_WEIGHT[cat]
+            if worst is None or RISK_ORDER[lr] > RISK_ORDER[worst]:
+                worst = lr
+        # The displayed count is "modules affected" by their worst scored
+        # line: a module with 45 lines is one medium, not 45. The penalty above
+        # weighs each line by its own severity.
+        if worst is not None:
+            counts[worst] += 1
 
     penalty = sum(
         max_points * (1 - math.exp(-weighted[sev] / scale))
